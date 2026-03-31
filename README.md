@@ -83,65 +83,14 @@ Tout en **Python** (standard du DL).
 
 ### Environnement
 - **VS Code** + extension **Google Colab** (exécution GPU distante)
-- **Google Drive** pour le stockage des données et checkpoints
+- **Google Drive partagé** pour le stockage des données et checkpoints
+- **Azure Education (100$)** en secours si Colab coupe pendant les longs entraînements
+
+> Voir **[SETUP.md](SETUP.md)** pour le guide d'installation complet.
 
 ### Interface utilisateur (optionnel)
 - `gradio` ou `streamlit` — interface web simple en Python pur
 - Ou front HTML/JS appelant le modèle via une API Python
-
----
-
-## Infrastructure d'entraînement
-
-### Temps d'entraînement estimé (scope restreint)
-| Matériel | Durée estimée |
-|---|---|
-| CPU seul | Plusieurs jours — inutilisable |
-| Google Colab (GPU T4 gratuit) | 4–10 heures |
-| Azure VM GPU (T4) | 2–5 heures |
-
-### Environnement de développement
-
-Le développement se fait en local sur **VS Code** avec l'**extension Google Colab**, qui permet d'exécuter les notebooks directement sur les GPUs de Colab depuis VS Code. Cela combine le confort de l'IDE local (git, extensions, autocomplétion) avec la puissance de calcul cloud.
-
-| Phase | Outil |
-|---|---|
-| Édition du code | **VS Code** (local) + extension Colab |
-| Exécution GPU (principal) | **Google Colab** (via l'extension VS Code) |
-| Exécution GPU (secours) | **Azure Education (100$)** — si Colab coupe pendant les longs entraînements |
-| Suivi des runs | **Weights & Biases (wandb)** — gratuit étudiants |
-
-### ⚠️ Règle absolue Azure
-> Toujours **stopper la VM immédiatement** après l'entraînement.
-> Une VM oubliée = crédits qui fondent inutilement (~1$/h).
-
-### Stockage des données
-
-Le dataset et les checkpoints sont stockés sur **Google Drive**, monté dans Colab :
-
-```python
-from google.colab import drive
-drive.mount('/content/drive')
-# Les données sont dans /content/drive/MyDrive/Filtre-Voix-DL/data/
-```
-
-> Le repo GitHub contient le code uniquement. Les fichiers audio et modèles entraînés restent sur Google Drive (trop volumineux pour git).
-
-### Checkpoints
-L'entraînement peut être interrompu et repris grâce aux checkpoints PyTorch :
-
-```python
-# Sauvegarder
-torch.save({
-    'epoch': epoch,
-    'model_state_dict': model.state_dict(),
-    'optimizer_state_dict': optimizer.state_dict(),
-    'loss': loss,
-}, "checkpoint_epoch_10.pth")
-
-# Recharger
-model.load_state_dict(torch.load("checkpoint_epoch_10.pth"))
-```
 
 ---
 
