@@ -1,0 +1,24 @@
+# Données audio (trop volumineux pour git — stocké sur Google Drive)
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# Modèles et checkpoints
+*.pth
+*.pt
+*.onnx
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Environnement
+.env
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
