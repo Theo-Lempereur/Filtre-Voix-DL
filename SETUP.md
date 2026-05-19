@@ -1,6 +1,25 @@
-# Guide d'installation
+# Guide d'installation et workflow
 
-Tout ce qu'il faut faire **avant de commencer à coder**. À suivre dans l'ordre.
+À lire **en entier avant de commencer à coder**. Ce document est ton point d'entrée unique : installation, workflow git, lancement d'une session, dépannage.
+
+> ⏱️ Prévoir ~30 min pour le setup initial.
+
+---
+
+## Sommaire
+
+1. [Cloner le repo](#1-cloner-le-repo)
+2. [Installer Python 3.11](#2-installer-python-311)
+3. [Créer le venv et installer les dépendances](#3-créer-le-venv-et-installer-les-dépendances)
+4. [Installer nbstripout (filtre git pour les notebooks)](#4-installer-nbstripout-filtre-git-pour-les-notebooks)
+5. [Configurer Google Drive](#5-configurer-google-drive)
+6. [Installer VS Code + extensions](#6-installer-vs-code--extensions)
+7. [Workflow git de l'équipe](#7-workflow-git-de-léquipe)
+8. [Lancer une session de travail](#8-lancer-une-session-de-travail)
+9. [Workflow après une modification de code](#9-workflow-après-une-modification-de-code)
+10. [Dépannage (FAQ)](#10-dépannage-faq)
+11. [Structure du repo](#11-structure-du-repo)
+12. [Règles d'or](#12-règles-dor)
 
 ---
 
@@ -20,25 +39,32 @@ Même si le code s'exécute sur Google Colab, il faut un Python local pour :
 - développer/tester les modules `src/` sans GPU
 - exécuter les outils dev (`nbstripout`, etc.)
 
-> On vise **Python 3.11** pour rester aligné avec Colab. Vérifiez la version exacte de votre runtime Colab avec une cellule `!python --version` et adaptez si besoin.
+> On vise **Python 3.11** pour rester aligné avec Colab.
 
 ### Windows
 
-Télécharger depuis [python.org/downloads](https://www.python.org/downloads/release/python-3119/) (cocher "Add to PATH" pendant l'install).
+1. Télécharger Python 3.11 depuis [python.org/downloads/release/python-3119](https://www.python.org/downloads/release/python-3119/)
+2. **Cocher "Add to PATH"** pendant l'installation
+3. Vérifier dans PowerShell :
+   ```powershell
+   py -0
+   ```
+   Doit lister `-V:3.11` parmi les versions installées.
 
-### macOS / Linux
+> Si tu as déjà Python (ex: 3.12), garde-le, 3.11 sera installé à côté. Le launcher `py -3.11` permet de choisir explicitement.
+
+### macOS
 
 ```bash
-# macOS
 brew install python@3.11
-
-# Ubuntu
-sudo apt install python3.11 python3.11-venv
+python3.11 --version   # vérification
 ```
 
-Vérifier :
+### Linux (Ubuntu/Debian)
+
 ```bash
-python --version   # doit afficher Python 3.11.x
+sudo apt install python3.11 python3.11-venv
+python3.11 --version
 ```
 
 ---
@@ -49,73 +75,73 @@ Un environnement virtuel isole les libs du projet du Python système. **Indispen
 
 ### Windows (PowerShell)
 
+Depuis le dossier du repo :
+
 ```powershell
-python -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> Si PowerShell bloque l'activation : `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`
+> Si PowerShell bloque l'activation avec une erreur d'exécution de scripts :
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+> ```
 
 ### macOS / Linux
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
 > Le venv (`.venv/`) est dans `.gitignore`, il ne sera pas committé.
 
+### Vérification
+
+Après installation :
+```powershell
+python --version   # Python 3.11.x
+pip list | findstr torch   # doit afficher torch 2.10.0 (CPU)
+```
+
+> Côté local, c'est la version **CPU** de torch qui est installée. Aucun GPU local n'est utilisé — l'entraînement se fait sur Colab.
+
 ### Sélectionner le venv dans VS Code
 
-`Ctrl+Shift+P` → **Python: Select Interpreter** → choisir `.venv/Scripts/python.exe` (Windows) ou `.venv/bin/python` (macOS/Linux).
+`Ctrl+Shift+P` → **Python: Select Interpreter** → choisir `.\.venv\Scripts\python.exe` (Windows) ou `.venv/bin/python` (macOS/Linux).
+
+> Si l'interpréteur n'apparaît pas, clique **Enter interpreter path** → **Find** → navigue vers le binaire.
 
 ---
 
 ## 4. Installer nbstripout (filtre git pour les notebooks)
 
-Évite que les sorties d'exécution, `execution_count`, et autres métadonnées volatiles polluent les diffs git.
+Évite que les sorties d'exécution, `execution_count`, et autres métadonnées volatiles polluent les diffs git. Sans ça, chaque ré-exécution d'une cellule génère un diff inutile.
 
 ```bash
-# Depuis le venv activé (nbstripout est dans requirements.txt)
+# Depuis le venv activé
 nbstripout --install --attributes .gitattributes
 ```
 
 > **À refaire après chaque `git clone`** (le filtre se configure dans `.git/config`, non versionné).
 
-Vérifier que ça marche : ouvrir un notebook, exécuter une cellule, faire `git diff main.ipynb` → ne doit montrer que les changements de code, pas les outputs.
+### Vérifier que ça marche
+
+Ouvre un notebook, exécute une cellule, puis :
+```bash
+git diff main.ipynb
+```
+Ne doit afficher **que les changements de code/markdown**, pas les outputs ni les `execution_count`.
 
 ---
 
-## 5. Choisir sa branche dans le notebook Colab
+## 5. Configurer Google Drive
 
-Le repo est public : pas d'auth nécessaire pour le clone côté Colab. Chaque membre travaille sur **sa propre branche** pour ne pas se marcher dessus.
-
-### Convention de nommage des branches
-
-```
-feature/<prenom>-<sujet>
-# ex: feature/theo-dataset, feature/lea-model
-```
-
-### Configurer la cellule clone
-
-Dans [main.ipynb](main.ipynb), modifier la variable `BRANCH` en haut de la cellule clone :
-
-```python
-BRANCH = 'feature/theo-dataset'   # ou 'main', etc.
-```
-
-Le notebook va `clone` (première fois) ou `fetch + checkout + pull` (sessions suivantes) cette branche. Il affiche la branche active + le dernier commit pour vérification.
-
-> **Important** : pour tester tes modifs locales sur Colab, il faut `commit + push` d'abord. La cellule `%autoreload` recharge automatiquement les modules si tu refais `!git pull` en cours de session.
-
----
-
-## 6. Configurer Google Drive
-
-Le dataset et les checkpoints sont stockés sur un **dossier Drive partagé** avec toute l'équipe. Le repo GitHub ne contient que le code.
+Le dataset, les checkpoints et les outputs sont stockés sur un **dossier Drive partagé** avec toute l'équipe. Le repo GitHub ne contient que le code.
 
 ### Accéder au Drive
 
@@ -124,7 +150,7 @@ Le dataset et les checkpoints sont stockés sur un **dossier Drive partagé** av
 3. Clic droit sur `Filtre-Voix-DL` → **Organiser** → **Ajouter un raccourci** → **Mon Drive**
 4. Vérifier qu'il est bien dans **Mon Drive**
 
-> Sans le raccourci dans Mon Drive, Colab ne pourra pas accéder au dossier.
+> ⚠️ Sans le raccourci dans Mon Drive, Colab ne peut pas accéder au dossier (il cherche `/content/drive/MyDrive/Filtre-Voix-DL`).
 
 ### Structure du Drive
 
@@ -138,59 +164,290 @@ Filtre-Voix-DL/
 └── outputs/         # Audio débruité
 ```
 
+Les dossiers sont créés automatiquement par la cellule de setup du notebook si absents.
+
 ---
 
-## 7. Installer VS Code + extensions
+## 6. Installer VS Code + extensions
 
 1. Installer [VS Code](https://code.visualstudio.com/)
-2. Extensions :
+2. Extensions à installer :
    - **Google Colab** — exécution sur GPU Colab depuis VS Code
    - **Jupyter** — support `.ipynb`
    - **Python** — autocomplétion, linting
 
 ---
 
-## 8. Lancer une session de travail
+## 7. Workflow git de l'équipe
 
-À chaque session :
+À **7 personnes sur un même repo**, la discipline git est essentielle. Le principe : personne ne push sur `main` directement, tout passe par des **Pull Requests**.
 
-1. Ouvrir le dossier `Filtre-Voix-DL` dans VS Code
-2. Activer le venv (VS Code le fait souvent automatiquement)
-3. Ouvrir `main.ipynb`
-4. Se connecter à un runtime Colab (bouton en haut à droite)
-5. Exécuter les cellules de setup dans l'ordre :
-   - `%pip install` (versions épinglées)
-   - Mount Drive
-   - Clone/pull du repo dans Colab
-   - Import de `src.config` et création des dossiers
-   - Vérification
+### Convention de nommage des branches
 
-> L'environnement Colab est éphémère : pip install et mount Drive sont à refaire à chaque session.
+```
+feature/<prenom>-<sujet>
+```
+
+Exemples :
+- `feature/theo-dataset`
+- `feature/lea-model`
+- `feature/marc-training-loop`
+
+### Créer ta branche au début d'une nouvelle tâche
+
+Depuis ton PC, dans le repo :
+
+```bash
+git checkout main
+git pull origin main                    # repartir de la version à jour
+git checkout -b feature/<prenom>-<sujet>
+git push -u origin feature/<prenom>-<sujet>
+```
+
+Le `-u` indique à git que cette branche locale suit la branche distante du même nom (utile pour les `git push` suivants).
+
+### Travailler sur ta branche
+
+Pendant ta tâche :
+```bash
+# modifier des fichiers ...
+git add <fichiers>
+git commit -m "Message clair décrivant ce que tu fais"
+git push                                # va sur ta branche, pas sur main
+```
+
+Bonnes pratiques :
+- **Commits petits et fréquents** (1 fonctionnalité = 1 commit) plutôt qu'un gros commit en fin de journée
+- Messages explicites : `Ajoute classe AudioDataset` plutôt que `update`
+- Si tu modifies du code de quelqu'un d'autre, vérifie sur quelle branche tu es (`git branch` affiche la branche active)
+
+### Synchroniser ta branche avec `main` régulièrement
+
+Pendant que tu bosses sur ta branche, les autres mergent leurs PRs dans `main`. Pour récupérer leurs changements :
+
+```bash
+git checkout main
+git pull origin main
+git checkout feature/<ta-branche>
+git merge main                          # ou git rebase main si tu préfères
+```
+
+> À faire **au moins une fois par jour** si plusieurs personnes mergent en parallèle. Évite les conflits massifs en fin de projet.
+
+### Ouvrir une Pull Request quand ta tâche est finie
+
+1. Push ta dernière version : `git push`
+2. Va sur [GitHub](https://github.com/Theo-Lempereur/Filtre-Voix-DL) → onglet **Pull requests** → **New pull request**
+3. Base : `main` ← Compare : `feature/<ta-branche>`
+4. Rédige un titre clair + description (qu'est-ce que ça apporte, comment tester)
+5. Demande à **au moins un autre membre** de relire avant de merger
+6. Une fois mergée, supprime ta branche (GitHub propose le bouton) et localement :
+   ```bash
+   git checkout main
+   git pull
+   git branch -d feature/<ta-branche>
+   ```
+
+### Règle d'or
+
+> **Personne ne push directement sur `main`.** Toute modification de `main` passe par une PR avec relecture.
 
 ---
 
-## 9. Structure du repo
+## 8. Lancer une session de travail
+
+À chaque fois que tu ouvres le projet :
+
+### Préparer ton environnement local
+
+1. Ouvre le dossier `Filtre-Voix-DL` dans VS Code
+2. Active le venv (VS Code le fait automatiquement si l'interpréteur est sélectionné — vérifie que `(.venv)` apparaît dans le terminal)
+3. Mets ta branche à jour si tu reviens après un moment :
+   ```bash
+   git checkout feature/<ta-branche>
+   git pull
+   ```
+
+### Ouvrir et configurer le notebook
+
+4. Ouvre `main.ipynb`
+5. **Connecte-toi à un runtime Colab** (bouton **Colab** ou kernel selector en haut à droite → choisir un runtime Colab GPU T4)
+6. **Modifie la variable `BRANCH`** dans la cellule clone pour pointer sur **ta** branche :
+   ```python
+   BRANCH = 'feature/<ton-prenom>-<sujet>'
+   ```
+
+### Exécuter les cellules de setup dans l'ordre
+
+| Cellule | Rôle | Temps |
+|---|---|---|
+| `%pip install librosa==... soundfile==... wandb==...` | Force les versions (libs déjà préinstallées sur Colab) | ~20s |
+| `from google.colab import drive; drive.mount(...)` | Monte ton Google Drive (autorise l'accès au popup) | ~10s |
+| Cellule **clone** (`BRANCH = ...`) | Clone ou pull ta branche dans `/content/Filtre-Voix-DL` | ~5s |
+| `importlib.reload(config)` | Force le re-import si la cellule a déjà été exécutée | <1s |
+| Cellule **autoreload** | Tente d'activer l'auto-reload — affiche un message "non chargé" sur Colab Python 3.12 (bug connu, sans impact) | <1s |
+| `from src import config` + création dossiers | Importe les constantes partagées + crée les dossiers Drive si absents | ~2s |
+| Cellule vérification | Affiche l'arborescence Drive | <1s |
+
+À la fin, tu dois voir :
+```
+Sample rate : 16000 Hz | clip : 4.0s | n_fft=512, hop=128
+Drive prêt !
+Filtre-Voix-DL/
+  data/
+    ...
+```
+
+> L'environnement Colab est éphémère : pip install et mount Drive sont à refaire à **chaque session**. Le runtime se déconnecte après ~90 min d'inactivité.
+
+---
+
+## 9. Workflow après une modification de code
+
+C'est **le cycle le plus important à maîtriser** pour bosser efficacement.
+
+### Le problème
+
+Quand tu modifies un fichier `src/*.py` sur ton PC, Colab ne le voit **pas automatiquement**. Le code modifié existe à 4 niveaux indépendants :
+
+```
+[1] Ton PC (fichier .py modifié)
+     ↓ git push
+[2] GitHub
+     ↓ git pull (sur Colab)
+[3] Colab — disque (/content/Filtre-Voix-DL/src/...)
+     ↓ reload / restart kernel
+[4] Colab — mémoire Python (modules déjà importés)
+```
+
+### Le cycle complet
+
+**Sur ton PC :**
+```bash
+# 1. Modifier src/dataset.py (ou autre)
+git add src/dataset.py
+git commit -m "Ajoute lecture des fichiers audio"
+git push                                # part sur GitHub (ta branche)
+```
+
+**Dans Colab :**
+1. **Ré-exécute la cellule clone** → fait `git pull`, ton disque Colab est à jour
+2. **Ré-exécute la cellule reload** (`importlib.reload(config)`) → ou utilise `importlib.reload(<module>)` pour d'autres modules
+3. **Continue avec tes cellules de travail**
+
+### Alternative simple : Restart kernel
+
+Si la situation devient confuse (plusieurs modules à recharger, état bizarre), le plus sûr est :
+
+**Runtime → Restart session** dans Colab, puis **Run All** depuis le haut du notebook.
+
+Ça repart d'un état propre en ~20 secondes. Coût marginal en DL où une époque d'entraînement prend des minutes.
+
+### ⚠️ Le piège classique
+
+Si tu modifies un fichier **localement** sans faire `git push`, puis tu ré-exécutes la cellule clone sur Colab → tu rechargeras l'**ancienne** version (celle qui est sur GitHub). Toujours `push` avant de retester sur Colab.
+
+---
+
+## 10. Dépannage (FAQ)
+
+### `Autoreload non chargé (No module named 'imp')`
+
+**Bug Colab connu** : Python 3.12 a supprimé le module `imp`, mais l'IPython installé sur Colab l'utilise encore dans `autoreload`.
+
+→ **Sans impact**, la cellule continue. Utiliser `importlib.reload(<module>)` ou **Restart kernel** quand tu modifies un fichier dans `src/`.
+
+### `Drive already mounted at /content/drive`
+
+Pas une erreur, juste une information. Tu peux passer à la cellule suivante.
+
+### `ModuleNotFoundError: No module named 'src'`
+
+La cellule clone n'a pas tourné (ou pas tourné avec succès). Vérifie qu'elle a affiché `Branche : ...` et `HEAD : ...`.
+
+### `userdata.SecretNotFoundError` ou `TimeoutException` sur secrets
+
+Tu as une vieille version du notebook qui demande un token GitHub. Pull la dernière version de ta branche — le repo est public, plus besoin de token.
+
+### `pip install` plante avec un conflit de versions
+
+Ton venv est probablement pollué. Recrée-le :
+```powershell
+deactivate
+Remove-Item -Recurse -Force .venv
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### `nbstripout` ne strip pas les outputs
+
+Tu l'as installé dans le venv mais pas configuré pour ce clone. Re-fais :
+```bash
+nbstripout --install --attributes .gitattributes
+```
+
+### Le runtime Colab est lent / je n'ai pas de GPU
+
+Vérifie : **Runtime → Change runtime type → T4 GPU**. Le runtime gratuit est limité, parfois indisponible aux heures de pointe.
+
+### J'ai un conflit de merge entre `main` et ma branche
+
+Demande de l'aide à quelqu'un de l'équipe qui maîtrise git. Surtout **ne pas faire `git reset --hard`** sans comprendre — tu peux perdre du travail.
+
+### J'ai pushé un `.wav` ou un `.pth` par erreur
+
+```bash
+git rm --cached <fichier>
+git commit -m "Retire <fichier> du tracking"
+git push
+```
+Note que le fichier reste dans l'historique git. Si c'était volumineux ou sensible, demande de l'aide.
+
+### Le secret token GitHub est dans mon historique de commits
+
+Va sur [github.com/settings/tokens](https://github.com/settings/tokens) et **révoque-le immédiatement**. Puis génère-en un nouveau si besoin.
+
+---
+
+## 11. Structure du repo
 
 ```
 Filtre-Voix-DL/
 ├── main.ipynb           # Notebook principal (setup + point d'entrée)
-├── README.md            # Contexte et objectifs
+├── README.md            # Contexte et objectifs du projet
 ├── SETUP.md             # Ce fichier
-├── requirements.txt     # Dépendances Python (versions épinglées)
+├── requirements.txt     # Dépendances Python (versions épinglées sur Colab)
 ├── .python-version      # Python 3.11
 ├── .gitattributes       # Filtre nbstripout
 ├── .gitignore           # Exclut .wav, .pth, .venv, etc.
-├── src/
+├── src/                 # Modules Python réutilisables
 │   ├── __init__.py
-│   └── config.py        # Constantes partagées (chemins, params audio)
-└── notebooks/           # Notebooks par étape du pipeline
+│   └── config.py        # Constantes partagées (chemins, params audio/STFT)
+└── notebooks/           # Notebooks par étape du pipeline (dataset, training, inférence)
 ```
+
+À mesure que le projet avance, `src/` accueillera :
+- `dataset.py` — PyTorch Dataset pour les paires (audio bruité, audio propre)
+- `model.py` — Architecture U-Net
+- `train.py` — Boucle d'entraînement
+- `audio.py` — Helpers STFT/ISTFT
+- `evaluate.py` — Métriques (SNR, PESQ, etc.)
 
 ---
 
-## Rappels
+## 12. Règles d'or
 
-- **Ne jamais commit** de fichiers audio (`.wav`) ou de modèles (`.pth`) sur GitHub — ils vont sur Drive
-- **Toujours travailler dans le venv** activé (sinon les versions divergent)
-- Les **checkpoints** permettent de reprendre un entraînement interrompu
-- Si vous utilisez **Azure** comme GPU de secours : toujours stopper la VM après l'entraînement (~1$/h)
+1. **Toujours bosser dans un venv activé** localement — sinon les versions divergent entre membres.
+2. **Toujours bosser sur ta branche**, jamais directement sur `main`.
+3. **`git pull` ta branche avant de commencer**, `git push` souvent.
+4. **Avant de tester une modif sur Colab : commit + push.** Sinon Colab récupère l'ancienne version.
+5. **Ne jamais commit** de fichiers audio (`.wav`), de modèles (`.pth`), de tokens/clés API.
+6. **Ne jamais push sur `main`** directement — toute modif passe par une PR.
+7. **Pull Request review** : faire relire ton code par au moins une personne avant de merger.
+8. **En cas de doute git** (conflit, état bizarre, perte potentielle) : demande de l'aide avant de faire `--hard` quoi que ce soit.
+9. **Si vous utilisez Azure** (GPU de secours) : toujours stopper la VM après l'entraînement (~1$/h).
+
+---
+
+*Document maintenu par l'équipe — si tu trouves une étape qui manque ou qui ne marche plus, ouvre une PR pour l'améliorer.*
