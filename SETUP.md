@@ -88,35 +88,23 @@ Vérifier que ça marche : ouvrir un notebook, exécuter une cellule, faire `git
 
 ---
 
-## 5. Configurer l'accès GitHub depuis Colab (repo privé)
+## 5. Choisir sa branche dans le notebook Colab
 
-Le notebook clone le repo dans la session Colab pour accéder aux modules `src/`. Comme le repo est privé, il faut un token.
+Le repo est public : pas d'auth nécessaire pour le clone côté Colab. Chaque membre travaille sur **sa propre branche** pour ne pas se marcher dessus.
 
-### Créer un Personal Access Token (à faire une fois)
+### Convention de nommage des branches
 
-1. Aller sur [github.com/settings/tokens](https://github.com/settings/tokens)
-2. **Generate new token** → **Generate new token (classic)**
-3. Note : `Colab - Filtre-Voix-DL`
-4. Expiration : 90 jours (ou plus selon vos préférences)
-5. Scope : cocher **`repo`** (accès complet aux repos privés)
-6. **Generate token** → **copier la valeur** (elle ne sera plus jamais visible)
+```
+feature/<prenom>-<sujet>
+# ex: feature/theo-dataset, feature/lea-model
+```
 
-### Stocker le token dans Colab Secrets (à faire une fois)
+### Configurer la cellule clone
 
-1. Dans Colab, cliquer sur l'icône **🔑** dans la barre de gauche
-2. **+ Add new secret**
-3. Nom : `GITHUB_TOKEN`
-4. Valeur : coller le token
-5. Activer **Notebook access** pour le notebook `main.ipynb`
-
-> Les secrets Colab sont liés à ton compte Google et chiffrés. Ne **jamais** mettre le token en clair dans le notebook.
-
-### Choisir sa branche à chaque session
-
-Dans la cellule de clone du notebook, modifier la variable `BRANCH` pour pointer sur ta branche de travail :
+Dans [main.ipynb](main.ipynb), modifier la variable `BRANCH` en haut de la cellule clone :
 
 ```python
-BRANCH = 'feature/dataset'   # ou 'main', etc.
+BRANCH = 'feature/theo-dataset'   # ou 'main', etc.
 ```
 
 Le notebook va `clone` (première fois) ou `fetch + checkout + pull` (sessions suivantes) cette branche. Il affiche la branche active + le dernier commit pour vérification.
