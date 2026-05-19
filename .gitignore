@@ -14,10 +14,14 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 
-# Environnement
+# Environnement virtuel
 .env
 .venv/
 venv/
+
+# Editeurs / IDE
+.vscode/
+.idea/
 
 # OS
 .DS_Store

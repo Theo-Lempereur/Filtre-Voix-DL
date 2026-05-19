@@ -1,0 +1,24 @@
+# Versions alignées sur Google Colab (avril/mai 2026)
+# Python 3.11 requis — voir SETUP.md
+
+# Deep Learning
+torch==2.10.0
+torchaudio==2.10.0
+
+# Traitement audio
+librosa==0.11.0
+soundfile==0.13.1
+scipy==1.16.3
+
+# Données / calcul
+numpy==2.0.2
+
+# Visualisation
+matplotlib==3.10.0
+
+# Suivi d'entraînement
+wandb==0.26.1
+
+# Notebook + dev
+ipykernel==6.17.1
+nbstripout==0.7.1
