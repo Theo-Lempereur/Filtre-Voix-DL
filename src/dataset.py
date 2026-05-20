@@ -35,17 +35,35 @@ def _list_audio_files(folder: str) -> dict[str, str]:
 
 
 def list_pairs(noisy_dir: str = config.DATA_NOISY,
-               clean_dir: str = config.DATA_CLEAN) -> list[tuple[str, str, str]]:
-    """Liste les paires de fichiers présentes dans les deux dossiers.
+               clean_dir: str = config.DATA_CLEAN,
+               pair_by: str = "auto") -> list[tuple[str, str, str]]:
+    """Liste les paires de fichiers (noisy, clean).
+
+    Parameters
+    ----------
+    pair_by : "name"  → apparie par nom de fichier identique (ex: p001.wav / p001.wav)
+              "index" → apparie par ordre trié (ex: train_001.wav ↔ test_001.wav)
+              "auto"  → essaie "name" d'abord, bascule sur "index" si 0 paires trouvées
 
     Returns
     -------
-    list de tuples (filename, noisy_path, clean_path), triée par filename.
+    list de tuples (label, noisy_path, clean_path), triée.
     """
     noisy = _list_audio_files(noisy_dir)
     clean = _list_audio_files(clean_dir)
-    common = sorted(set(noisy.keys()) & set(clean.keys()))
-    return [(name, noisy[name], clean[name]) for name in common]
+
+    if pair_by in ("name", "auto"):
+        common = sorted(set(noisy.keys()) & set(clean.keys()))
+        if common:
+            return [(name, noisy[name], clean[name]) for name in common]
+        if pair_by == "name":
+            return []
+
+    # pair_by == "index" (ou fallback auto)
+    noisy_sorted = sorted(noisy.values())
+    clean_sorted = sorted(clean.values())
+    n = min(len(noisy_sorted), len(clean_sorted))
+    return [(f"pair_{i:04d}", noisy_sorted[i], clean_sorted[i]) for i in range(n)]
 
 
 class PairedAudioDataset(Dataset):
@@ -68,6 +86,7 @@ class PairedAudioDataset(Dataset):
                  clip_samples: int = config.CLIP_SAMPLES,
                  crop_mode: str = "random",
                  return_spectrogram: bool = True,
+                 pair_by: str = "auto",
                  files: Iterable[str] | None = None):
         self.noisy_dir = noisy_dir
         self.clean_dir = clean_dir
@@ -76,7 +95,7 @@ class PairedAudioDataset(Dataset):
         self.crop_mode = crop_mode
         self.return_spectrogram = return_spectrogram
 
-        pairs = list_pairs(noisy_dir, clean_dir)
+        pairs = list_pairs(noisy_dir, clean_dir, pair_by=pair_by)
         if files is not None:
             wanted = set(files)
             pairs = [p for p in pairs if p[0] in wanted]
