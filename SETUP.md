@@ -157,14 +157,13 @@ Le dataset, les checkpoints et les outputs sont stockés sur un **dossier Drive 
 ```
 Filtre-Voix-DL/
 ├── data/
-│   ├── clean/       # Voix propres
-│   ├── noise/       # Bruits isolés
-│   └── mixed/       # Mélanges voix + bruit
-├── checkpoints/     # Modèles sauvegardés
-└── outputs/         # Audio débruité
+│   ├── clean/       # Voix propres (du dataset paire)
+│   └── noisy/       # Voix bruitées correspondantes (du dataset paire)
+├── checkpoints/     # Modèles sauvegardés pendant l'entraînement
+└── outputs/         # Audio débruité produit par le modèle
 ```
 
-Les dossiers sont créés automatiquement par la cellule de setup du notebook si absents.
+Les dossiers `checkpoints/` et `outputs/` sont créés automatiquement par la cellule de setup du notebook si absents. Les dossiers `data/clean` et `data/noisy` doivent contenir le **dataset paire** téléchargé en amont par l'équipe (cf. [README.md](README.md) section Dataset).
 
 ---
 

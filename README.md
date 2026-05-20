@@ -2,22 +2,23 @@
 
 ## Contexte
 
-Projet de fin d'année réalisé en groupe de **7 étudiants en informatique**, sur une durée de **2 mois**. L'équipe n'a pas de connaissances préalables en Machine Learning ou Deep Learning. L'objectif pédagogique est double : livrer un outil fonctionnel et acquérir des bases solides en DL en préparation d'une **spécialisation IA l'année suivante**.
+Projet de fin d'année réalisé par une équipe de **3 étudiants en informatique**, sur une durée de **5 semaines**. L'équipe n'a pas de connaissances préalables en Machine Learning ou Deep Learning. L'objectif pédagogique est double : livrer un outil fonctionnel et acquérir des bases solides en DL en préparation d'une **spécialisation IA l'année suivante**.
 
 ---
 
 ## Objectif du projet
 
-Construire un outil de **débruitage audio** capable d'isoler une voix humaine dans un enregistrement contenant des bruits de fond connus et prédéfinis.
+Construire un outil de **débruitage audio** capable d'isoler une voix humaine dans un enregistrement contenant des bruits de fond ambiants courants.
 
 > L'outil prend en entrée un fichier audio bruité, et retourne un fichier audio avec la voix isolée. **Pas de temps réel** — traitement par fichier.
 
-### Bruits ciblés (scope volontairement restreint)
-- Bruit blanc
-- Soufflerie / ventilateur
-- Bruit de souris (clics)
+### Bruits ciblés
+- Bruit blanc / souffle
+- Café / restaurant
+- Brouhaha (foule, voix multiples en arrière-plan)
+- Bruit de rue / circulation
 
-Ce scope restreint est une décision intentionnelle : il rend le problème faisable en 2 mois tout en permettant d'apprendre vraiment.
+Ce périmètre correspond aux bruits présents dans le dataset paire utilisé pour l'entraînement. D'autres types de bruits (ventilateur, clics, bruits domestiques spécifiques) pourront être envisagés en extension si le temps le permet — via augmentation synthétique du dataset.
 
 ---
 
@@ -55,13 +56,17 @@ Le U-Net est une architecture encoder/decoder avec des **skip connections**, ini
 
 ## Dataset
 
-Le dataset sera **généré synthétiquement** par l'équipe :
+L'équipe utilise un **dataset public de paires `(audio bruité, audio propre)`** déjà annoté. Chaque exemple consiste en :
+- Un enregistrement de voix humaine bruitée (~4 secondes en moyenne, jusqu'à ~10 secondes)
+- La version propre correspondante de la même voix
+- Le bruit de fond couvre les catégories listées ci-dessus (blanc, café, brouhaha, rue)
 
-1. Enregistrements de voix propres (membres du groupe + datasets publics libres)
-2. Bruits ciblés enregistrés ou générés programmatiquement (bruit blanc via numpy)
-3. Mélange voix + bruit à différents niveaux de volume → milliers d'exemples
+**Avantages de cette approche** :
+- Pas besoin de générer le mélange synthétiquement → pipeline plus simple, gain de temps
+- Distribution de bruit réaliste (enregistrements en conditions ambiantes)
+- Dataset déjà aligné et validé
 
-Avantage : aucune dépendance à un dataset externe rare ou payant.
+> Le dataset est stocké sur le Drive partagé (`data/clean/` et `data/noisy/` ou structure équivalente fournie par le dataset). Le repo GitHub ne contient pas les fichiers audio.
 
 ---
 
@@ -108,7 +113,7 @@ Tout en **Python** (standard du DL).
 - Les bases du traitement du signal audio (STFT, spectrogrammes)
 - L'architecture CNN / U-Net
 - L'entraînement d'un réseau de neurones from scratch avec PyTorch
-- La génération et gestion d'un dataset
+- L'exploration et l'exploitation d'un dataset audio annoté
 - L'utilisation d'infrastructure cloud GPU (Google Colab)
 - Le suivi et l'évaluation d'un modèle DL
 
