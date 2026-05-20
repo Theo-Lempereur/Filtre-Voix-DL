@@ -125,17 +125,20 @@ pip list | findstr torch   # doit afficher torch 2.10.0 (CPU)
 ```bash
 # Depuis le venv activé
 nbstripout --install --attributes .gitattributes
+git config --local filter.nbstripout.extrakeys "metadata.kernelspec metadata.language_info"
 ```
 
 > **À refaire après chaque `git clone`** (le filtre se configure dans `.git/config`, non versionné).
 
+La deuxième commande supprime également les métadonnées de version du kernel (Python 3.11 local vs 3.12 sur Colab) — sans ça, chaque run Colab génère un diff parasite sur la version Python.
+
 ### Vérifier que ça marche
 
-Ouvre un notebook, exécute une cellule, puis :
+Ouvre un notebook, exécute une cellule sur Colab, puis :
 ```bash
 git diff main.ipynb
 ```
-Ne doit afficher **que les changements de code/markdown**, pas les outputs ni les `execution_count`.
+Ne doit afficher **que les changements de code/markdown**, ni les outputs, ni les `execution_count`, ni les versions Python.
 
 ---
 
@@ -381,10 +384,21 @@ pip install -r requirements.txt
 
 ### `nbstripout` ne strip pas les outputs
 
-Tu l'as installé dans le venv mais pas configuré pour ce clone. Re-fais :
+Tu l'as installé dans le venv mais pas configuré pour ce clone. Re-fais les deux commandes :
 ```bash
 nbstripout --install --attributes .gitattributes
+git config --local filter.nbstripout.extrakeys "metadata.kernelspec metadata.language_info"
 ```
+
+### Git me montre des diffs de version Python (`3.11` → `3.12.13`) dans les notebooks
+
+Colab écrit sa version Python dans les métadonnées du notebook à chaque run. C'est du bruit pur, à ne pas committer.
+
+Fix : la deuxième commande de la section 4 règle ça. Si tu ne l'as pas encore faite :
+```bash
+git config --local filter.nbstripout.extrakeys "metadata.kernelspec metadata.language_info"
+```
+Puis annule les changements en attente : `git checkout -- *.ipynb`
 
 ### Le runtime Colab est lent / je n'ai pas de GPU
 
