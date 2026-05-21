@@ -126,11 +126,13 @@ pip list | findstr torch   # doit afficher torch 2.10.0 (CPU)
 # Depuis le venv activé
 nbstripout --install --attributes .gitattributes
 git config --local filter.nbstripout.extrakeys "metadata.kernelspec metadata.language_info"
+git config --local core.autocrlf false
 ```
 
-> **À refaire après chaque `git clone`** (le filtre se configure dans `.git/config`, non versionné).
+> **À refaire après chaque `git clone`** (ces trois réglages se font dans `.git/config`, qui n'est pas versionné).
 
-La deuxième commande supprime également les métadonnées de version du kernel (Python 3.11 local vs 3.12 sur Colab) — sans ça, chaque run Colab génère un diff parasite sur la version Python.
+- La 2ᵉ commande supprime les métadonnées de version kernel (Python 3.11 local vs 3.12 Colab)
+- La 3ᵉ commande désactive la conversion automatique des fins de ligne de Windows — sans ça, git génère de faux diffs à chaque exécution de notebook
 
 ### Vérifier que ça marche
 
@@ -384,11 +386,23 @@ pip install -r requirements.txt
 
 ### `nbstripout` ne strip pas les outputs
 
-Tu l'as installé dans le venv mais pas configuré pour ce clone. Re-fais les deux commandes :
+Tu l'as installé dans le venv mais pas configuré pour ce clone. Re-fais les trois commandes de la section 4 :
 ```bash
 nbstripout --install --attributes .gitattributes
 git config --local filter.nbstripout.extrakeys "metadata.kernelspec metadata.language_info"
+git config --local core.autocrlf false
 ```
+
+### Git me montre des notebooks "modifiés" alors que je n'ai rien changé
+
+Cause probable : `core.autocrlf=true` dans ta config git globale Windows. Git convertit les fins de ligne au checkout, ce qui crée de faux diffs.
+
+Fix en deux commandes :
+```bash
+git config --local core.autocrlf false
+git restore .
+```
+`git status` doit ensuite afficher `nothing to commit`. Si tu viens de cloner le repo, fais plutôt les 3 commandes de la section 4 d'un coup.
 
 ### Git me montre des diffs de version Python (`3.11` → `3.12.13`) dans les notebooks
 
