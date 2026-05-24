@@ -1,0 +1,23 @@
+# Dépendances pour l'entraînement local sur GPU NVIDIA (CUDA).
+# À installer EN PLUS de requirements.txt, dans le même venv.
+#
+# Plateforme cible : Windows / Linux + GPU NVIDIA récent (RTX 30/40/50).
+# Les Mac (Silicon ou Intel) n'utilisent PAS ce fichier — voir SETUP.md.
+#
+# Installation :
+#   pip uninstall -y torch torchaudio        # retire la build CPU si déjà installée
+#   pip install -r requirements-gpu.txt
+#
+# Vérification :
+#   python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+#
+# CUDA 12.8 est requis pour les GPU Blackwell (RTX 50). Pour des GPU plus
+# anciens (RTX 20/30/40), CUDA 12.8 reste compatible. Si besoin d'une autre
+# version de CUDA, remplacer cu128 par cu126 / cu124 / cu121 selon le pilote
+# (voir https://pytorch.org/get-started/locally/).
+
+--index-url https://download.pytorch.org/whl/cu128
+--extra-index-url https://pypi.org/simple
+
+torch==2.10.0
+torchaudio==2.10.0

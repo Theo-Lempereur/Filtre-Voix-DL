@@ -4,9 +4,73 @@ Importer depuis n'importe quel notebook / module pour garantir que tout le monde
 utilise les mêmes valeurs (sampling rate, STFT, etc.).
 """
 import os
+from pathlib import Path
 
-# --- Chemins Drive (Colab) ---
-DRIVE_PROJECT = "/content/drive/MyDrive/Filtre-Voix-DL"
+
+# Chemin Colab par défaut — utilisé comme fallback si rien d'autre n'est trouvé,
+# pour ne pas casser ``from src import config`` côté dev local sans Drive Desktop.
+_DEFAULT_COLAB_ROOT = "/content/drive/MyDrive/Filtre-Voix-DL"
+
+
+def _detect_project_root() -> str:
+    """Détecte la racine du projet (dossier Drive partagé) selon l'environnement.
+
+    Ordre de priorité :
+      1. Variable d'environnement ``FILTRE_VOIX_DL_ROOT`` (override explicite).
+      2. Colab : Drive monté sous ``/content/drive/MyDrive``.
+      3. Local : chemins usuels de Google Drive for Desktop (Win/macOS/Linux).
+      4. Fallback silencieux vers le chemin Colab (les notebooks d'exploration
+         locale peuvent importer ``src.config`` sans Drive sync).
+
+    L'import ne lève jamais : si rien n'est dispo, c'est ``ensure_project_root()``
+    (appelé par les scripts d'entraînement) qui échouera proprement.
+    """
+    env = os.environ.get("FILTRE_VOIX_DL_ROOT")
+    if env:
+        return env
+
+    if os.path.exists("/content/drive/MyDrive"):
+        return _DEFAULT_COLAB_ROOT
+
+    # Drive Desktop monte sous la lettre suivante libre (G: → Z:), et le nom du
+    # sous-dossier dépend de la langue de Windows ("My Drive" en anglais,
+    # "Mon Drive" en français). On balaie les combinaisons usuelles.
+    win_letters = ["G:", "H:", "I:", "J:"]
+    win_subdirs = ["My Drive", "Mon Drive"]
+    candidates = [
+        Path(f"{letter}/{subdir}/Filtre-Voix-DL")
+        for letter in win_letters
+        for subdir in win_subdirs
+    ]
+    candidates += [
+        Path.home() / "Google Drive" / "My Drive" / "Filtre-Voix-DL",                                          # macOS / Linux
+        Path.home() / "Library" / "CloudStorage" / "GoogleDrive-stonslemps@gmail.com" / "My Drive" / "Filtre-Voix-DL",  # macOS récent
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+
+    return _DEFAULT_COLAB_ROOT
+
+
+def ensure_project_root() -> str:
+    """Vérifie que ``DRIVE_PROJECT`` pointe vers un dossier existant.
+
+    Appelée par les scripts d'entraînement (``scripts/train_local.py``) pour
+    échouer tôt avec un message clair si Drive Desktop n'est pas synchronisé.
+    """
+    if not os.path.isdir(DRIVE_PROJECT):
+        raise RuntimeError(
+            f"Racine du projet introuvable : {DRIVE_PROJECT!r}. "
+            "Installer Google Drive for Desktop et synchroniser le dossier "
+            "'Filtre-Voix-DL', ou définir la variable d'environnement "
+            "FILTRE_VOIX_DL_ROOT vers le chemin local."
+        )
+    return DRIVE_PROJECT
+
+
+# --- Racine du projet (Colab ou Drive Desktop local) ---
+DRIVE_PROJECT = _detect_project_root()
 
 # Dataset principal : paires (voix bruitée, voix propre) fournies par le dataset public
 # Ces deux dossiers restent pour les notebooks d'exploration (00, 01, 02).

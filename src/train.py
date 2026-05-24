@@ -34,6 +34,7 @@ from torch.utils.data import DataLoader, Subset
 from . import config as cfg
 from . import checkpoint as ckpt_io
 from .dataset import PairedAudioDataset
+from .lock import TrainingLock, LockStolenError
 from .logging_utils import Logger
 from .metrics import (
     magnitude_mse_loss,
@@ -42,6 +43,12 @@ from .metrics import (
     OverfitMonitor,
 )
 from .model import UNet
+
+
+# Fréquence de rafraîchissement du heartbeat du lock (en secondes). Doit être
+# nettement plus court que `src.lock.STALE_AFTER_SECONDS` (300 s) pour qu'une
+# session active ne soit jamais considérée comme morte.
+_LOCK_HEARTBEAT_SECONDS = 60
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +62,19 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def _pick_device() -> torch.device:
+    """Sélectionne le meilleur device disponible : CUDA > MPS (Mac Silicon) > CPU.
+
+    MPS (Metal Performance Shaders) est l'équivalent CUDA sur Mac M1/M2/M3/M4
+    et est inclus dans torch stable depuis 2.0. Pas de dépendance à installer.
+    """
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def _resolve_config(user_config: dict) -> dict:
@@ -122,6 +142,8 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
                      log_every: int = 0,
                      save_every_seconds: float = 0.0,
                      save_fn=None,
+                     heartbeat_fn=None,
+                     heartbeat_every_seconds: float = 0.0,
                      global_step_start: int = 0) -> tuple[float, int]:
     """Une epoch complète d'entraînement.
 
@@ -141,6 +163,7 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
     window_count    = 0
     global_step     = global_step_start
     last_save_at    = time.time()
+    last_heartbeat_at = time.time()
 
     for batch in loader:
         noisy = batch["noisy_mag"].to(device, non_blocking=True)
@@ -186,6 +209,18 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
                 except Exception as e:
                     print(f"[train] intra-save ignorée ({e})")
                 last_save_at = time.time()
+
+        # --- Heartbeat du lock partagé ---
+        if heartbeat_fn is not None and heartbeat_every_seconds > 0:
+            if time.time() - last_heartbeat_at >= heartbeat_every_seconds:
+                try:
+                    heartbeat_fn()
+                except LockStolenError:
+                    # Quelqu'un nous a pris le lock via --force : on stoppe.
+                    raise
+                except Exception as e:
+                    print(f"[train] heartbeat ignoré ({e})")
+                last_heartbeat_at = time.time()
 
     return total_loss / max(n_batches, 1), global_step
 
@@ -236,6 +271,7 @@ def train(
     max_train_samples: int | None = None,
     max_val_samples: int | None = None,
     progress: bool = True,
+    force_lock: bool = False,
 ) -> dict[str, list]:
     """Lance un entraînement complet et retourne l'historique sous forme de dict.
 
@@ -250,9 +286,32 @@ def train(
     run_id = config.get("run_id") or time.strftime("run-%Y%m%d-%H%M%S")
     config["run_id"] = run_id
 
+    with TrainingLock(run_id=run_id, force=force_lock) as lock:
+        return _train_locked(
+            config=config,
+            run_id=run_id,
+            resume_from=resume_from,
+            max_train_samples=max_train_samples,
+            max_val_samples=max_val_samples,
+            progress=progress,
+            lock=lock,
+        )
+
+
+def _train_locked(
+    *,
+    config: dict,
+    run_id: str,
+    resume_from: str | None,
+    max_train_samples: int | None,
+    max_val_samples: int | None,
+    progress: bool,
+    lock: TrainingLock,
+) -> dict[str, list]:
+    """Corps de la boucle d'entraînement, exécuté sous lock acquis."""
     _seed_everything(config["seed"])
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _pick_device()
     print(f"[train] device={device} | run_id={run_id}")
 
     # --- Data ---
@@ -348,6 +407,8 @@ def train(
                 log_every=config["intra_epoch_log_every"],
                 save_every_seconds=config["intra_epoch_save_seconds"],
                 save_fn=_intra_save,
+                heartbeat_fn=lock.heartbeat,
+                heartbeat_every_seconds=_LOCK_HEARTBEAT_SECONDS,
                 global_step_start=global_step,
             )
             val_metrics = _validate(model, val_loader, device)
