@@ -4,23 +4,104 @@ Importer depuis n'importe quel notebook / module pour garantir que tout le monde
 utilise les mêmes valeurs (sampling rate, STFT, etc.).
 """
 import os
+from pathlib import Path
 
-# --- Chemins Drive (Colab) ---
-DRIVE_PROJECT = "/content/drive/MyDrive/Filtre-Voix-DL"
+
+# Chemin Colab par défaut — utilisé comme fallback si rien d'autre n'est trouvé,
+# pour ne pas casser ``from src import config`` côté dev local sans Drive Desktop.
+_DEFAULT_COLAB_ROOT = "/content/drive/MyDrive/Filtre-Voix-DL"
+
+
+def _detect_project_root() -> str:
+    """Détecte la racine du projet (dossier Drive partagé) selon l'environnement.
+
+    Ordre de priorité :
+      1. Variable d'environnement ``FILTRE_VOIX_DL_ROOT`` (override explicite).
+      2. Colab : Drive monté sous ``/content/drive/MyDrive``.
+      3. Local : chemins usuels de Google Drive for Desktop (Win/macOS/Linux).
+      4. Fallback silencieux vers le chemin Colab (les notebooks d'exploration
+         locale peuvent importer ``src.config`` sans Drive sync).
+
+    L'import ne lève jamais : si rien n'est dispo, c'est ``ensure_project_root()``
+    (appelé par les scripts d'entraînement) qui échouera proprement.
+    """
+    env = os.environ.get("FILTRE_VOIX_DL_ROOT")
+    if env:
+        return env
+
+    if os.path.exists("/content/drive/MyDrive"):
+        return _DEFAULT_COLAB_ROOT
+
+    # Drive Desktop monte sous la lettre suivante libre (G: → Z:), et le nom du
+    # sous-dossier dépend de la langue de Windows ("My Drive" en anglais,
+    # "Mon Drive" en français). On balaie les combinaisons usuelles.
+    win_letters = ["G:", "H:", "I:", "J:"]
+    win_subdirs = ["My Drive", "Mon Drive"]
+    candidates = [
+        Path(f"{letter}/{subdir}/Filtre-Voix-DL")
+        for letter in win_letters
+        for subdir in win_subdirs
+    ]
+    candidates += [
+        Path.home() / "Google Drive" / "My Drive" / "Filtre-Voix-DL",                                          # macOS / Linux
+        Path.home() / "Library" / "CloudStorage" / "GoogleDrive-stonslemps@gmail.com" / "My Drive" / "Filtre-Voix-DL",  # macOS récent
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c)
+
+    return _DEFAULT_COLAB_ROOT
+
+
+def ensure_project_root() -> str:
+    """Vérifie que ``DRIVE_PROJECT`` pointe vers un dossier existant.
+
+    Appelée par les scripts d'entraînement (``scripts/train_local.py``) pour
+    échouer tôt avec un message clair si Drive Desktop n'est pas synchronisé.
+    """
+    if not os.path.isdir(DRIVE_PROJECT):
+        raise RuntimeError(
+            f"Racine du projet introuvable : {DRIVE_PROJECT!r}. "
+            "Installer Google Drive for Desktop et synchroniser le dossier "
+            "'Filtre-Voix-DL', ou définir la variable d'environnement "
+            "FILTRE_VOIX_DL_ROOT vers le chemin local."
+        )
+    return DRIVE_PROJECT
+
+
+# --- Racine du projet (Colab ou Drive Desktop local) ---
+DRIVE_PROJECT = _detect_project_root()
 
 # Dataset principal : paires (voix bruitée, voix propre) fournies par le dataset public
+# Ces deux dossiers restent pour les notebooks d'exploration (00, 01, 02).
 DATA_CLEAN = os.path.join(DRIVE_PROJECT, "data/clean")   # version propre des enregistrements
 DATA_NOISY = os.path.join(DRIVE_PROJECT, "data/noisy")   # version bruitée des mêmes enregistrements
+
+# Split train / val / test — utilisé pour l'entraînement et l'évaluation.
+# La répartition est effectuée une seule fois (cf. scripts/split_data ou notebook 04).
+DATA_TRAIN_CLEAN = os.path.join(DRIVE_PROJECT, "data/train/clean")
+DATA_TRAIN_NOISY = os.path.join(DRIVE_PROJECT, "data/train/noisy")
+DATA_VAL_CLEAN   = os.path.join(DRIVE_PROJECT, "data/val/clean")
+DATA_VAL_NOISY   = os.path.join(DRIVE_PROJECT, "data/val/noisy")
+DATA_TEST_CLEAN  = os.path.join(DRIVE_PROJECT, "data/test/clean")
+DATA_TEST_NOISY  = os.path.join(DRIVE_PROJECT, "data/test/noisy")
 
 # Sorties de l'entraînement et de l'inférence
 CHECKPOINTS = os.path.join(DRIVE_PROJECT, "checkpoints")
 OUTPUTS = os.path.join(DRIVE_PROJECT, "outputs")
+LOGS = os.path.join(DRIVE_PROJECT, "logs")   # JSONL d'historique d'entraînement
 
 # Optionnel — pour une augmentation synthétique éventuelle (extension)
 DATA_NOISE_AUG = os.path.join(DRIVE_PROJECT, "data/noise_aug")
 
 # Dossiers créés automatiquement par le notebook de setup
-ALL_DIRS = [DATA_CLEAN, DATA_NOISY, CHECKPOINTS, OUTPUTS]
+ALL_DIRS = [
+    DATA_CLEAN, DATA_NOISY,
+    DATA_TRAIN_CLEAN, DATA_TRAIN_NOISY,
+    DATA_VAL_CLEAN, DATA_VAL_NOISY,
+    DATA_TEST_CLEAN, DATA_TEST_NOISY,
+    CHECKPOINTS, OUTPUTS, LOGS,
+]
 
 # --- Paramètres audio ---
 SAMPLE_RATE = 16000          # Hz — standard pour la voix (vs 44.1k pour la musique)
@@ -35,3 +116,33 @@ MAX_CLIP_DURATION = 10.0     # secondes — durée max observée dans le dataset
 N_FFT = 512                  # taille de la fenêtre FFT
 HOP_LENGTH = 128             # décalage entre fenêtres (= 75% overlap)
 WIN_LENGTH = 512             # longueur effective de la fenêtre
+
+
+# --- Hyperparamètres d'entraînement (valeurs par défaut, surchargeables) ---
+BATCH_SIZE     = 8           # tient sur un GPU T4 avec base_channels=32
+NUM_WORKERS    = 2           # Colab : éviter > 2 (RAM partagée)
+LR             = 1e-3        # Adam : 1e-3 est un bon point de départ
+WEIGHT_DECAY   = 0.0         # pas de régularisation L2 explicite en v1
+NUM_EPOCHS     = 50          # plafond ; early stopping coupera plus tôt si besoin
+BASE_CHANNELS  = 32          # largeur du U-Net (≈7,85M params)
+SEED           = 42          # graine globale (torch, numpy, random)
+GRAD_CLIP_NORM = 1.0         # protège contre les NaN en début d'entraînement
+
+# --- Split par défaut (si on génère un split automatiquement) ---
+SPLIT_RATIOS = (0.8, 0.1, 0.1)   # train / val / test
+
+# --- Politique de checkpoints ---
+CKPT_EVERY_N_EPOCHS = 1      # 1 = on sauvegarde à chaque epoch
+KEEP_LAST_N_CKPT    = 3      # rotation : on garde les N derniers epoch_*.pt
+EARLY_STOP_PATIENCE = 7      # epochs sans amélioration de val avant arrêt
+LR_PATIENCE         = 3      # epochs sans amélioration avant ReduceLROnPlateau
+LR_FACTOR           = 0.1    # facteur de réduction du LR
+
+# --- Sauvegarde et log INTRA-epoch (sécurité contre coupures Colab) ---
+# Sauvegarde `last.pt` toutes les N secondes pendant une epoch, sans attendre
+# la fin de l'epoch. À la reprise, on repart au début de l'epoch en cours
+# avec les poids les plus récents — au pire on perd ces N secondes de calcul.
+INTRA_EPOCH_SAVE_SECONDS = 15 * 60   # 15 minutes
+# Log `train_loss_step` à wandb tous les N batches. Permet de voir la courbe
+# d'apprentissage dès les premières minutes, sans attendre la fin d'epoch.
+INTRA_EPOCH_LOG_EVERY    = 50        # batches

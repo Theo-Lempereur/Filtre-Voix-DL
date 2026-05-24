@@ -306,6 +306,106 @@ Filtre-Voix-DL/
 
 ---
 
+## 8 bis. Entraînement local long (hors Colab)
+
+Colab reste idéal pour **tester rapidement** une modif (dataset, model, mini-train de 2 epochs). Mais pour les **sessions longues** (≥ 1h), les coupures Colab (~90 min d'inactivité, déconnexion GPU) deviennent un problème. On lance alors l'entraînement **en local**, sur le GPU de la personne disponible.
+
+> Le code est le même qu'en Colab : c'est juste un autre point d'entrée (`scripts/train_local.py`). Pas de fork, pas de duplication.
+
+### Pré-requis
+
+1. **Google Drive for Desktop** installé et synchronisant le dossier `Filtre-Voix-DL` localement.
+   - Windows : le dossier apparaît sous `G:\My Drive\Filtre-Voix-DL` (ou `H:\` selon ton install).
+   - macOS : `~/Library/CloudStorage/GoogleDrive-<email>/My Drive/Filtre-Voix-DL`.
+   - Vérifie que `data/train/`, `data/val/`, `checkpoints/` y sont bien présents (sync terminée).
+   - Si ton chemin Drive est inhabituel, définis la variable d'environnement `FILTRE_VOIX_DL_ROOT` vers le chemin local.
+
+2. **Accélération matérielle** (sinon l'entraînement tournera sur CPU, ~50× plus lent — inadapté pour du long).
+
+   La sélection de device est automatique : `train.py` prend **CUDA → MPS → CPU** dans cet ordre. Selon ta plateforme :
+
+   | Plateforme | Action | Device utilisé |
+   |---|---|---|
+   | **Windows / Linux + GPU NVIDIA** (RTX 20/30/40/50) | `pip uninstall -y torch torchaudio` puis `pip install -r requirements-gpu.txt` (CUDA 12.8) | `cuda` |
+   | **Mac Apple Silicon** (M1/M2/M3/M4) | Rien à faire — MPS (Metal) est inclus dans torch stock | `mps` |
+   | **Mac Intel** | Rien à faire — pas d'accélération possible sur Mac Intel | `cpu` (déconseillé pour long) |
+   | **Windows / Linux sans GPU NVIDIA** | Rien à faire | `cpu` (déconseillé pour long) |
+
+   Vérifier ce qui est dispo :
+   ```powershell
+   # Windows / Linux NVIDIA
+   python -c "import torch; print('cuda:', torch.cuda.is_available()); print('gpu:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none')"
+   # Mac Silicon
+   python -c "import torch; print('mps:', torch.backends.mps.is_available())"
+   ```
+
+   > Pour les RTX 50 (Blackwell), CUDA 12.8 est **obligatoire** — c'est ce que pointe `requirements-gpu.txt`. Pour des GPU plus anciens, cu128 reste compatible.
+
+   > Si tu n'as pas de GPU local, coordonne avec un équipier qui en a un : le lock partagé sur Drive est justement fait pour ça.
+
+### Lancer une session
+
+Depuis la racine du repo, venv activé :
+
+```powershell
+# Lancement nominal (run de nuit)
+python scripts/train_local.py --run-id unet_big --epochs 100 --batch-size 16
+
+# Surcharge fine via fichier JSON
+python scripts/train_local.py --run-id unet_v2 --config-file configs/v2.json
+
+# Reprise après crash / coupure
+python scripts/train_local.py --run-id unet_big --resume last
+```
+
+Tous les checkpoints, logs et outputs vont sur **Drive** (donc partagés avec l'équipe en temps réel). Le stdout est dupliqué dans `<DRIVE>/logs/<run-id>.log` : n'importe quel membre peut suivre la session depuis son poste.
+
+### Le lock d'entraînement partagé
+
+Pour éviter que deux personnes lancent un entraînement en même temps (collision Drive, confusion d'équipe), le script pose un fichier de lock sur Drive : **`<DRIVE>/.training_lock.json`**.
+
+- Il vit **hors git** (Drive uniquement) → il traverse les branches, les machines et les comptes.
+- Tant qu'il existe et qu'il a un heartbeat récent (< 5 min), tout autre lancement est refusé avec un message identifiant le détenteur (utilisateur, machine, branche, run_id, PID).
+- Le heartbeat est mis à jour toutes les 60 s pendant l'entraînement.
+- Au-delà de 5 min sans heartbeat (= process mort, crash, coupure de courant), le lock est considéré comme stale et le prochain `train_local.py` le reprend automatiquement avec un warning.
+
+**Voir qui entraîne en ce moment** (depuis n'importe quel poste) :
+
+```powershell
+# Windows
+type "G:\My Drive\Filtre-Voix-DL\.training_lock.json"
+# macOS / Linux
+cat ~/Google\ Drive/My\ Drive/Filtre-Voix-DL/.training_lock.json
+```
+
+**Forcer un démarrage** si tu es certain que l'autre run est mort (et que ton équipier ne répond pas sur Discord) :
+
+```powershell
+python scripts/train_local.py --run-id ... --force
+```
+
+> ⚠️ Avant `--force`, demande sur le canal de l'équipe. Deux entraînements simultanés sur Drive saturent la sync et peuvent corrompre les checkpoints.
+
+**Sémantique de `--force`** — c'est juste un override du *check* de lock, **pas un kill switch**. Concrètement :
+
+- `--force` écrase le fichier lock avec ton payload et démarre ton run.
+- Si l'autre run est réellement mort (crash, fenêtre fermée) → tout va bien, tu prends la suite.
+- Si l'autre run est encore vivant → au prochain heartbeat (max 60 s plus tard), il détecte que le lock ne lui appartient plus et **s'arrête tout seul** avec `LockStolenError`. Pendant ces ≤ 60 s, deux trainings tournent en parallèle.
+- `--force` ne tue jamais un autre process directement — c'est impossible de manière fiable cross-machine via Drive.
+
+Donc : utilise `--force` uniquement si tu es **sûr** que l'autre est mort. Sinon préviens d'abord pour qu'il arrête proprement (Ctrl+C).
+
+### Quand utiliser quoi
+
+| Tu veux… | Outil | Pourquoi |
+|---|---|---|
+| Tester une modif `src/*.py` en 5 min | **Colab** + `notebooks/04_training_session.ipynb` avec `max_train_samples=20` | Pas besoin de GPU local, setup en 2 cellules |
+| Explorer/visualiser les données | **Colab** ou local CPU + notebooks 00-02 | Pas besoin d'entraîner |
+| Entraînement complet (≥ 1h) | **Local** + `scripts/train_local.py` | Pas de coupure 90 min, GPU stable |
+| Entraînement de nuit | **Local** + `scripts/train_local.py` en `Start-Process` détaché | Survit à la fermeture de VS Code |
+
+---
+
 ## 9. Workflow après une modification de code
 
 C'est **le cycle le plus important à maîtriser** pour bosser efficacement.
@@ -441,17 +541,24 @@ Va sur [github.com/settings/tokens](https://github.com/settings/tokens) et **ré
 
 ```
 Filtre-Voix-DL/
-├── main.ipynb           # Notebook principal (setup + point d'entrée)
-├── README.md            # Contexte et objectifs du projet
-├── SETUP.md             # Ce fichier
-├── requirements.txt     # Dépendances Python (versions épinglées sur Colab)
-├── .python-version      # Python 3.11
-├── .gitattributes       # Filtre nbstripout
-├── .gitignore           # Exclut .wav, .pth, .venv, etc.
-├── src/                 # Modules Python réutilisables
+├── main.ipynb              # Notebook principal (setup + point d'entrée Colab)
+├── README.md               # Contexte et objectifs du projet
+├── SETUP.md                # Ce fichier
+├── requirements.txt        # Dépendances Python (CPU, alignées Colab)
+├── requirements-gpu.txt    # Surcouche CUDA pour entraînement local GPU
+├── .python-version         # Python 3.11
+├── .gitattributes          # Filtre nbstripout
+├── .gitignore              # Exclut .wav, .pth, .venv, etc.
+├── src/                    # Modules Python réutilisables
 │   ├── __init__.py
-│   └── config.py        # Constantes partagées (chemins, params audio/STFT)
-└── notebooks/           # Notebooks par étape du pipeline (dataset, training, inférence)
+│   ├── config.py           # Constantes partagées + détection racine projet
+│   ├── lock.py             # Lock d'entraînement partagé via Drive
+│   ├── train.py            # Boucle d'entraînement
+│   └── ...                 # model, dataset, checkpoint, metrics, audio, logging_utils
+├── scripts/
+│   ├── split_data.py       # Split train/val/test du dataset
+│   └── train_local.py      # CLI entraînement local (hors Colab)
+└── notebooks/              # Notebooks par étape du pipeline
 ```
 
 À mesure que le projet avance, `src/` accueillera :
