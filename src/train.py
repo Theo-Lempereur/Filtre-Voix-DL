@@ -122,15 +122,26 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
                      log_every: int = 0,
                      save_every_seconds: float = 0.0,
                      save_fn=None,
-                     global_step_start: int = 0) -> tuple[float, int]:
+                     global_step_start: int = 0,
+                     progress_every: int = 5,
+                     progress_seconds: float = 30.0) -> tuple[float, int]:
     """Une epoch complète d'entraînement.
 
     Si `logger` et `log_every > 0` : on push `train_loss_step` (moyenne glissante
     sur `log_every` batches) à wandb / au JSONL pour avoir une courbe live.
+    Un dernier flush est fait en fin d'epoch même si `window_count < log_every`,
+    pour garantir au moins un point loggé par epoch (utile sur les petits
+    datasets où len(loader) peut être inférieur à `log_every`).
 
     Si `save_fn` et `save_every_seconds > 0` : on appelle `save_fn(global_step)`
     périodiquement pour sauvegarder un `last.pt` en cours d'epoch — sécurité
-    anti-coupure Colab.
+    anti-coupure Colab. Chaque save imprime une ligne dans la console pour
+    confirmer visuellement qu'il a bien eu lieu.
+
+    Imprime aussi une ligne de progression toutes les `progress_every` batches
+    ou toutes les `progress_seconds` (le premier qui arrive) :
+        ep   1 | batch  10/ 46 | loss 0.0432 | 0.42s/batch
+    → indispensable pour voir si l'epoch avance, sans attendre sa fin.
 
     Retourne (train_loss_epoch_moyenne, nouveau_global_step).
     """
@@ -141,8 +152,14 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
     window_count    = 0
     global_step     = global_step_start
     last_save_at    = time.time()
+    last_progress_at = time.time()
+    last_progress_batch = 0
+    epoch_start = time.time()
+
+    n_total = len(loader)
 
     for batch in loader:
+        batch_t0 = time.time()
         noisy = batch["noisy_mag"].to(device, non_blocking=True)
         clean = batch["clean_mag"].to(device, non_blocking=True)
 
@@ -161,13 +178,25 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
         n_batches       += 1
         global_step     += 1
 
+        # --- Print de progression (toutes les N batches OU toutes les T secondes) ---
+        time_since_progress = time.time() - last_progress_at
+        batches_since_progress = n_batches - last_progress_batch
+        if (batches_since_progress >= progress_every
+                or time_since_progress >= progress_seconds):
+            batch_dt = time.time() - batch_t0
+            avg_dt = (time.time() - epoch_start) / n_batches
+            print(f"  ep {epoch:3d} | batch {n_batches:3d}/{n_total:3d} | "
+                  f"loss {loss_val:.4f} | {avg_dt:.2f}s/batch", flush=True)
+            last_progress_at = time.time()
+            last_progress_batch = n_batches
+
         # --- Log intra-epoch (moyenne glissante de train_loss) ---
         if logger is not None and log_every > 0 and window_count >= log_every:
             avg = window_loss_sum / window_count
             try:
-                # On utilise logger.log avec une "epoch fractionnaire" pour que
-                # wandb empile les points dans l'ordre. Le JSONL marque ce point
-                # comme intra-epoch via la clé `is_step`.
+                # On utilise logger.log avec l'epoch courante pour que wandb
+                # empile les points dans l'ordre. Le JSONL marque ce point comme
+                # intra-epoch via la clé `is_step`.
                 logger.log(epoch, {
                     "train_loss_step": avg,
                     "global_step":     global_step,
@@ -181,11 +210,31 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
         # --- Sauvegarde intra-epoch (toutes les N secondes) ---
         if save_fn is not None and save_every_seconds > 0:
             if time.time() - last_save_at >= save_every_seconds:
+                save_t0 = time.time()
                 try:
                     save_fn(global_step)
+                    save_dt = time.time() - save_t0
+                    print(f"  [intra-save] last.pt écrit "
+                          f"(batch {n_batches}/{n_total}, {save_dt:.1f}s)",
+                          flush=True)
                 except Exception as e:
-                    print(f"[train] intra-save ignorée ({e})")
+                    print(f"  [intra-save] ÉCHEC ({type(e).__name__}: {e})",
+                          flush=True)
                 last_save_at = time.time()
+
+    # --- Flush du buffer de log en fin d'epoch ---
+    # Garantit au moins un point `train_loss_step` par epoch même si
+    # `log_every` est plus grand que le nombre de batches.
+    if logger is not None and log_every > 0 and window_count > 0:
+        avg = window_loss_sum / window_count
+        try:
+            logger.log(epoch, {
+                "train_loss_step": avg,
+                "global_step":     global_step,
+                "is_step":         True,
+            })
+        except Exception:
+            pass
 
     return total_loss / max(n_batches, 1), global_step
 
@@ -267,6 +316,14 @@ def train(
         shuffle=False, crop_mode="center", max_samples=max_val_samples,
     )
     print(f"[train] batches : train={len(train_loader)}  val={len(val_loader)}")
+
+    # --- Résolution de `intra_epoch_log_every` si "auto" ---
+    # "auto" → ~10 points par epoch quel que soit la taille du dataset.
+    log_every_raw = config.get("intra_epoch_log_every", 0)
+    if log_every_raw == "auto":
+        config["intra_epoch_log_every"] = max(1, len(train_loader) // 10)
+        print(f"[train] intra_epoch_log_every=auto → "
+              f"{config['intra_epoch_log_every']} (≈ {len(train_loader) // max(1, config['intra_epoch_log_every'])} points par epoch)")
 
     # --- Modèle / optim / scheduler ---
     model = UNet(base_channels=config["base_channels"]).to(device)
