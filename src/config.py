@@ -73,3 +73,12 @@ KEEP_LAST_N_CKPT    = 3      # rotation : on garde les N derniers epoch_*.pt
 EARLY_STOP_PATIENCE = 7      # epochs sans amélioration de val avant arrêt
 LR_PATIENCE         = 3      # epochs sans amélioration avant ReduceLROnPlateau
 LR_FACTOR           = 0.1    # facteur de réduction du LR
+
+# --- Sauvegarde et log INTRA-epoch (sécurité contre coupures Colab) ---
+# Sauvegarde `last.pt` toutes les N secondes pendant une epoch, sans attendre
+# la fin de l'epoch. À la reprise, on repart au début de l'epoch en cours
+# avec les poids les plus récents — au pire on perd ces N secondes de calcul.
+INTRA_EPOCH_SAVE_SECONDS = 15 * 60   # 15 minutes
+# Log `train_loss_step` à wandb tous les N batches. Permet de voir la courbe
+# d'apprentissage dès les premières minutes, sans attendre la fin d'epoch.
+INTRA_EPOCH_LOG_EVERY    = 50        # batches

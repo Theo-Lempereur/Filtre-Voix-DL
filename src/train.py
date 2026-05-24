@@ -81,6 +81,9 @@ def _resolve_config(user_config: dict) -> dict:
         "logs_root":           cfg.LOGS,
         "use_wandb":           True,
         "early_stop_enabled":  True,
+        # Sauvegarde et log intra-epoch (anti-coupure Colab)
+        "intra_epoch_save_seconds": cfg.INTRA_EPOCH_SAVE_SECONDS,
+        "intra_epoch_log_every":    cfg.INTRA_EPOCH_LOG_EVERY,
     }
     return {**defaults, **dict(user_config)}
 
@@ -113,10 +116,32 @@ def _build_loader(noisy_dir: str, clean_dir: str, *, batch_size: int,
 # ---------------------------------------------------------------------------
 
 def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
-                     log_step_fn=None) -> float:
+                     *,
+                     epoch: int,
+                     logger=None,
+                     log_every: int = 0,
+                     save_every_seconds: float = 0.0,
+                     save_fn=None,
+                     global_step_start: int = 0) -> tuple[float, int]:
+    """Une epoch complète d'entraînement.
+
+    Si `logger` et `log_every > 0` : on push `train_loss_step` (moyenne glissante
+    sur `log_every` batches) à wandb / au JSONL pour avoir une courbe live.
+
+    Si `save_fn` et `save_every_seconds > 0` : on appelle `save_fn(global_step)`
+    périodiquement pour sauvegarder un `last.pt` en cours d'epoch — sécurité
+    anti-coupure Colab.
+
+    Retourne (train_loss_epoch_moyenne, nouveau_global_step).
+    """
     model.train()
     total_loss = 0.0
-    n_batches = 0
+    n_batches  = 0
+    window_loss_sum = 0.0
+    window_count    = 0
+    global_step     = global_step_start
+    last_save_at    = time.time()
+
     for batch in loader:
         noisy = batch["noisy_mag"].to(device, non_blocking=True)
         clean = batch["clean_mag"].to(device, non_blocking=True)
@@ -129,12 +154,40 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         optimizer.step()
 
-        total_loss += float(loss.item())
-        n_batches += 1
-        if log_step_fn is not None:
-            log_step_fn(float(loss.item()))
+        loss_val = float(loss.item())
+        total_loss      += loss_val
+        window_loss_sum += loss_val
+        window_count    += 1
+        n_batches       += 1
+        global_step     += 1
 
-    return total_loss / max(n_batches, 1)
+        # --- Log intra-epoch (moyenne glissante de train_loss) ---
+        if logger is not None and log_every > 0 and window_count >= log_every:
+            avg = window_loss_sum / window_count
+            try:
+                # On utilise logger.log avec une "epoch fractionnaire" pour que
+                # wandb empile les points dans l'ordre. Le JSONL marque ce point
+                # comme intra-epoch via la clé `is_step`.
+                logger.log(epoch, {
+                    "train_loss_step": avg,
+                    "global_step":     global_step,
+                    "is_step":         True,
+                })
+            except Exception:
+                pass
+            window_loss_sum = 0.0
+            window_count    = 0
+
+        # --- Sauvegarde intra-epoch (toutes les N secondes) ---
+        if save_fn is not None and save_every_seconds > 0:
+            if time.time() - last_save_at >= save_every_seconds:
+                try:
+                    save_fn(global_step)
+                except Exception as e:
+                    print(f"[train] intra-save ignorée ({e})")
+                last_save_at = time.time()
+
+    return total_loss / max(n_batches, 1), global_step
 
 
 @torch.no_grad()
@@ -230,7 +283,7 @@ def train(
         "epoch": [], "train_loss": [], "val_loss": [], "val_si_sdr": [],
         "lr": [], "mask_mean": [], "mask_std": [],
         "gap": [], "gap_ratio": [], "val_plateau_epochs": [],
-        "val_increasing": [], "diverging": [],
+        "val_increasing": [], "diverging": [], "global_step": [],
     }
     start_epoch = 0
     best_val = float("inf")
@@ -262,13 +315,40 @@ def train(
     logger = Logger(run_id=run_id, config_dict=config,
                     use_wandb=config["use_wandb"], log_dir=config["logs_root"])
 
+    # Global step (compteur de batches cumulés sur tout le run) — utilisé pour
+    # ordonner les logs intra-epoch dans wandb. Restauré depuis l'historique
+    # repris s'il existe.
+    global_step = int(history["global_step"][-1]) if history["global_step"] else 0
+
+    # --- Save fn pour les sauvegardes intra-epoch ---
+    def _intra_save(gstep: int) -> None:
+        """Sauvegarde `last.pt` au milieu d'une epoch.
+
+        Note : `epoch` est la VARIABLE de boucle ci-dessous (capturée par
+        closure). On stocke `epoch - 1` car l'epoch courante n'est pas
+        terminée — à la reprise, on recommence cette epoch depuis le début
+        avec les poids actuels.
+        """
+        ckpt_io.save_checkpoint(
+            ckpt_dir / "last.pt", model, optimizer, scheduler,
+            epoch=max(epoch - 1, 0),   # epoch en cours non terminée
+            best_val_loss=best_val,
+            run_id=run_id, config=config, history=history,
+        )
+
     try:
         for epoch in range(start_epoch + 1, config["num_epochs"] + 1):
             t0 = time.time()
 
-            train_loss = _train_one_epoch(
+            train_loss, global_step = _train_one_epoch(
                 model, train_loader, optimizer, device,
                 grad_clip_norm=config["grad_clip_norm"],
+                epoch=epoch,
+                logger=logger,
+                log_every=config["intra_epoch_log_every"],
+                save_every_seconds=config["intra_epoch_save_seconds"],
+                save_fn=_intra_save,
+                global_step_start=global_step,
             )
             val_metrics = _validate(model, val_loader, device)
             scheduler.step(val_metrics["val_loss"])
@@ -289,6 +369,7 @@ def train(
             history["val_plateau_epochs"].append(flags["val_plateau_epochs"])
             history["val_increasing"].append(flags["val_increasing"])
             history["diverging"].append(flags["diverging"])
+            history["global_step"].append(global_step)
 
             logger.log(epoch, {
                 "train_loss": train_loss,
