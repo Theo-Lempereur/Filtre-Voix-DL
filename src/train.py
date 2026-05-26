@@ -43,6 +43,7 @@ from .metrics import (
     OverfitMonitor,
 )
 from .model import UNet
+from .scheduler import DualMetricPlateauScheduler
 
 
 # Fréquence de rafraîchissement du heartbeat du lock (en secondes). Doit être
@@ -377,9 +378,12 @@ def _train_locked(
         model.parameters(), lr=config["lr"],
         weight_decay=config["weight_decay"],
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min",
-        factor=config["lr_factor"], patience=config["lr_patience"],
+    # Scheduler hybride : on ne réduit le LR que si val_loss ET val_si_sdri
+    # plateauent toutes les deux (cf. src.scheduler).
+    scheduler = DualMetricPlateauScheduler(
+        optimizer,
+        patience=config["lr_patience"],
+        factor=config["lr_factor"],
     )
 
     history: dict[str, list] = {
@@ -387,10 +391,12 @@ def _train_locked(
         "noisy_si_sdr": [], "val_si_sdri": [],
         "lr": [], "mask_mean": [], "mask_std": [],
         "gap": [], "gap_ratio": [], "val_plateau_epochs": [],
+        "secondary_plateau_epochs": [],
         "val_increasing": [], "diverging": [], "global_step": [],
     }
     start_epoch = 0
     best_val = float("inf")
+    best_val_si_sdri = float("-inf")
 
     # --- Reprise éventuelle ---
     if resume_from:
@@ -399,6 +405,7 @@ def _train_locked(
         )
         start_epoch = info["epoch"]
         best_val    = info["best_val_loss"]
+        best_val_si_sdri = info.get("best_val_si_sdri", float("-inf"))
         if info.get("history"):
             # Restaure l'historique pour qu'OverfitMonitor garde sa mémoire
             for k, v in info["history"].items():
@@ -418,6 +425,12 @@ def _train_locked(
     monitor = OverfitMonitor(patience=config["early_stop_patience"])
     for i, ep in enumerate(history["epoch"]):
         monitor.update(ep, history["train_loss"][i], history["val_loss"][i])
+        # Réalimente aussi la métrique secondaire si présente dans l'historique
+        # (anciens runs sans val_si_sdri : les valeurs sont NaN, on saute).
+        if i < len(history.get("val_si_sdri", [])):
+            v = history["val_si_sdri"][i]
+            if isinstance(v, (int, float)) and v == v:  # filtre NaN
+                monitor.update_secondary(ep, float(v), higher_is_better=True)
 
     ckpt_dir = Path(config["checkpoints_root"]) / run_id
     ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -444,6 +457,7 @@ def _train_locked(
             ckpt_dir / "last.pt", model, optimizer, scheduler,
             epoch=max(epoch - 1, 0),   # epoch en cours non terminée
             best_val_loss=best_val,
+            best_val_si_sdri=best_val_si_sdri,
             run_id=run_id, config=config, history=history,
         )
 
@@ -464,10 +478,15 @@ def _train_locked(
                 global_step_start=global_step,
             )
             val_metrics = _validate(model, val_loader, device)
-            scheduler.step(val_metrics["val_loss"])
+            lr_reduced = scheduler.step(
+                val_metrics["val_loss"], val_metrics["val_si_sdri"]
+            )
             current_lr = optimizer.param_groups[0]["lr"]
 
             monitor.update(epoch, train_loss, val_metrics["val_loss"])
+            monitor.update_secondary(
+                epoch, val_metrics["val_si_sdri"], higher_is_better=True
+            )
             flags = monitor.flags()
 
             history["epoch"].append(epoch)
@@ -482,50 +501,84 @@ def _train_locked(
             history["gap"].append(flags["gap"])
             history["gap_ratio"].append(flags["gap_ratio"])
             history["val_plateau_epochs"].append(flags["val_plateau_epochs"])
+            history["secondary_plateau_epochs"].append(
+                flags["secondary_plateau_epochs"]
+            )
             history["val_increasing"].append(flags["val_increasing"])
             history["diverging"].append(flags["diverging"])
             history["global_step"].append(global_step)
 
+            # --- Checkpoints ---
+            # On évalue les deux critères AVANT de logger, pour pouvoir mettre
+            # un marqueur ★ dans le print et tracer is_best_* dans wandb.
+            is_best_loss = val_metrics["val_loss"] < best_val
+            is_best_sdri = val_metrics["val_si_sdri"] > best_val_si_sdri
+            if is_best_loss:
+                best_val = val_metrics["val_loss"]
+            if is_best_sdri:
+                best_val_si_sdri = val_metrics["val_si_sdri"]
+
             logger.log(epoch, {
-                "train_loss":   train_loss,
-                "val_loss":     val_metrics["val_loss"],
-                "val_si_sdr":   val_metrics["val_si_sdr"],
-                "noisy_si_sdr": val_metrics["noisy_si_sdr"],
-                "val_si_sdri":  val_metrics["val_si_sdri"],
-                "lr":           current_lr,
-                "mask_mean":    val_metrics["mask_mean"],
-                "mask_std":     val_metrics["mask_std"],
+                "train_loss":     train_loss,
+                "val_loss":       val_metrics["val_loss"],
+                "val_si_sdr":     val_metrics["val_si_sdr"],
+                "noisy_si_sdr":   val_metrics["noisy_si_sdr"],
+                "val_si_sdri":    val_metrics["val_si_sdri"],
+                "lr":             current_lr,
+                "lr_reduced":     bool(lr_reduced),
+                "mask_mean":      val_metrics["mask_mean"],
+                "mask_std":       val_metrics["mask_std"],
+                "best_val_loss":  best_val,
+                "best_val_si_sdri": best_val_si_sdri,
+                "is_best_loss":   bool(is_best_loss),
+                "is_best_sdri":   bool(is_best_sdri),
                 **flags,
-                "epoch_seconds": time.time() - t0,
+                "epoch_seconds":  time.time() - t0,
             })
 
             if progress:
+                star = ""
+                if is_best_loss and is_best_sdri:
+                    star = " ★ both"
+                elif is_best_loss:
+                    star = " ★ loss"
+                elif is_best_sdri:
+                    star = " ★ sdri"
                 print(f"  ep {epoch:3d} | train {train_loss:.4f}  "
                       f"val {val_metrics['val_loss']:.4f}  "
                       f"SI-SDR {val_metrics['val_si_sdr']:+.2f} dB  "
                       f"SI-SDRi {val_metrics['val_si_sdri']:+.2f} dB  "
                       f"(noisy {val_metrics['noisy_si_sdr']:+.2f})  "
-                      f"gap {flags['gap']:+.4f}  lr {current_lr:.2e}  "
-                      f"({time.time() - t0:.1f}s)")
+                      f"plat L{flags['val_plateau_epochs']}/S{flags['secondary_plateau_epochs']}  "
+                      f"lr {current_lr:.2e}  "
+                      f"({time.time() - t0:.1f}s){star}")
 
-            # --- Checkpoints ---
-            is_best = val_metrics["val_loss"] < best_val
-            if is_best:
-                best_val = val_metrics["val_loss"]
+            # Sauvegardes (le `best.pt` garde sa sémantique historique = best val_loss)
+            if is_best_loss:
                 ckpt_io.save_checkpoint(
                     ckpt_dir / "best.pt", model, optimizer, scheduler,
                     epoch=epoch, best_val_loss=best_val,
+                    best_val_si_sdri=best_val_si_sdri,
+                    run_id=run_id, config=config, history=history,
+                )
+            if is_best_sdri:
+                ckpt_io.save_checkpoint(
+                    ckpt_dir / "best_si_sdri.pt", model, optimizer, scheduler,
+                    epoch=epoch, best_val_loss=best_val,
+                    best_val_si_sdri=best_val_si_sdri,
                     run_id=run_id, config=config, history=history,
                 )
             ckpt_io.save_checkpoint(
                 ckpt_dir / "last.pt", model, optimizer, scheduler,
                 epoch=epoch, best_val_loss=best_val,
+                best_val_si_sdri=best_val_si_sdri,
                 run_id=run_id, config=config, history=history,
             )
             if epoch % config["ckpt_every_n_epochs"] == 0:
                 ckpt_io.save_checkpoint(
                     ckpt_dir / f"epoch_{epoch:03d}.pt", model, optimizer,
                     scheduler, epoch=epoch, best_val_loss=best_val,
+                    best_val_si_sdri=best_val_si_sdri,
                     run_id=run_id, config=config, history=history,
                 )
                 ckpt_io.rotate_checkpoints(ckpt_dir, config["keep_last_n_ckpt"])

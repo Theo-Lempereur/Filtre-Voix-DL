@@ -69,8 +69,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run-id", required=True,
                    help="Identifiant unique du run (sert de sous-dossier checkpoints/<run-id>/).")
     p.add_argument("--resume", default=None,
-                   help="'last' / 'best' (cherche dans checkpoints/<run-id>/), "
-                        "ou chemin absolu vers un .pt.")
+                   help="'last' / 'best' / 'best_si_sdri' (cherche dans "
+                        "checkpoints/<run-id>/), ou chemin absolu vers un .pt.")
     p.add_argument("--config-file", default=None,
                    help="Fichier JSON optionnel d'overrides de config (mergé après les flags).")
 
@@ -97,7 +97,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _resolve_resume(arg: str | None, run_id: str) -> str | None:
     if not arg:
         return None
-    if arg in ("last", "best"):
+    if arg in ("last", "best", "best_si_sdri"):
         return str(Path(cfg.CHECKPOINTS) / run_id / f"{arg}.pt")
     return arg
 

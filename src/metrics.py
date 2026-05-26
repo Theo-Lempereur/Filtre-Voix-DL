@@ -116,22 +116,36 @@ class OverfitMonitor:
     """
 
     def __init__(self, patience: int = 7, smooth_window: int = 3,
-                 min_delta: float = 1e-4):
+                 min_delta: float = 1e-4,
+                 secondary_min_delta: float = 1e-3):
         """
         Args:
-            patience      : nb d'epochs sans amélioration de val avant early stop.
-            smooth_window : fenêtre pour le lissage du gap (réduit le bruit).
-            min_delta     : amélioration minimale pour réinitialiser `patience`.
+            patience            : nb d'epochs sans amélioration de val avant early stop.
+            smooth_window       : fenêtre pour le lissage du gap (réduit le bruit).
+            min_delta           : amélioration minimale pour réinitialiser `patience`
+                                  sur la métrique primaire (val_loss).
+            secondary_min_delta : idem pour la métrique secondaire (par défaut
+                                  val_si_sdri, en dB). Plus tolérant que `min_delta`
+                                  car le SI-SDR est plus bruité.
         """
         self.patience = patience
         self.smooth_window = smooth_window
         self.min_delta = min_delta
+        self.secondary_min_delta = secondary_min_delta
 
         self.train_losses: list[float] = []
         self.val_losses:   list[float] = []
         self.epochs:       list[int]   = []
         self._best_val: float = float("inf")
         self._epochs_since_improve: int = 0
+
+        # Métrique secondaire (optionnelle). Tant que `update_secondary` n'a
+        # pas été appelée, `_secondary_used` reste False et `should_early_stop`
+        # retombe sur la logique val_loss seule (rétrocompatibilité).
+        self._best_secondary: float | None = None
+        self._secondary_higher_is_better: bool = True
+        self._epochs_since_secondary_improve: int = 0
+        self._secondary_used: bool = False
 
     # ---- mise à jour ----
 
@@ -146,6 +160,37 @@ class OverfitMonitor:
         else:
             self._epochs_since_improve += 1
 
+    def update_secondary(self, epoch: int, value: float,
+                         higher_is_better: bool = True) -> None:
+        """Met à jour le compteur de plateau d'une métrique secondaire.
+
+        Le premier appel initialise `best_secondary` à `value` (peu importe
+        `higher_is_better`). Les appels suivants comparent avec
+        `secondary_min_delta` pour décider si on a "amélioré".
+
+        Tant qu'on n'appelle pas cette méthode, `should_early_stop()` reste
+        sur la logique val_loss seule.
+        """
+        self._secondary_used = True
+        self._secondary_higher_is_better = bool(higher_is_better)
+        value = float(value)
+
+        if self._best_secondary is None:
+            self._best_secondary = value
+            self._epochs_since_secondary_improve = 0
+            return
+
+        if higher_is_better:
+            improved = value > self._best_secondary + self.secondary_min_delta
+        else:
+            improved = value < self._best_secondary - self.secondary_min_delta
+
+        if improved:
+            self._best_secondary = value
+            self._epochs_since_secondary_improve = 0
+        else:
+            self._epochs_since_secondary_improve += 1
+
     # ---- introspection ----
 
     @property
@@ -155,6 +200,18 @@ class OverfitMonitor:
     @property
     def epochs_since_improve(self) -> int:
         return self._epochs_since_improve
+
+    @property
+    def best_secondary(self) -> float | None:
+        return self._best_secondary
+
+    @property
+    def epochs_since_secondary_improve(self) -> int:
+        return self._epochs_since_secondary_improve
+
+    @property
+    def secondary_used(self) -> bool:
+        return self._secondary_used
 
     def _smoothed(self, values: list[float]) -> float:
         """Moyenne des `smooth_window` dernières valeurs (ou de tout, si moins)."""
@@ -178,6 +235,7 @@ class OverfitMonitor:
                 "gap": float("nan"),
                 "gap_ratio": float("nan"),
                 "val_plateau_epochs": 0,
+                "secondary_plateau_epochs": int(self._epochs_since_secondary_improve),
                 "val_increasing": False,
                 "diverging": False,
             }
@@ -192,16 +250,27 @@ class OverfitMonitor:
         diverging = bool(val_inc and train_dec)
 
         return {
-            "gap":                float(gap),
-            "gap_ratio":          float(gap_ratio),
-            "val_plateau_epochs": int(self._epochs_since_improve),
-            "val_increasing":     bool(val_inc),
-            "diverging":          bool(diverging),
+            "gap":                      float(gap),
+            "gap_ratio":                float(gap_ratio),
+            "val_plateau_epochs":      int(self._epochs_since_improve),
+            "secondary_plateau_epochs": int(self._epochs_since_secondary_improve),
+            "val_increasing":          bool(val_inc),
+            "diverging":               bool(diverging),
         }
 
     def should_early_stop(self) -> bool:
-        """True si la val_loss n'a pas progressé depuis `patience` epochs."""
-        return self._epochs_since_improve >= self.patience
+        """True si les conditions d'arrêt sont remplies.
+
+        - Si aucune métrique secondaire n'a été enregistrée : logique
+          historique (val_loss seul).
+        - Sinon : logique "ET" — les deux métriques doivent plateauer
+          depuis au moins `patience` epochs.
+        """
+        primary_plateau = self._epochs_since_improve >= self.patience
+        if not self._secondary_used:
+            return primary_plateau
+        secondary_plateau = self._epochs_since_secondary_improve >= self.patience
+        return primary_plateau and secondary_plateau
 
 
 # ---------------------------------------------------------------------------
