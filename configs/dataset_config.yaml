@@ -1,0 +1,138 @@
+clean_preprocessing:
+  input_dir: "G:/.shortcut-targets-by-id/1z2M8g6Bhqr235VfNU5aKKxSQm8EQAQ94/Filtre-Voix-DL/data/jules/wav"
+  output_dir: "data/processed/clean_chunks"
+  metadata_dir: "data/metadata"
+  logs_dir: "data/logs"
+
+  sample_rate: 16000
+  mono: true
+  chunk_duration_sec: 3.0
+
+  max_files: 30
+  shuffle_files: true
+  random_seed: 42
+
+  # Si false : les fichiers < 3 sec sont ignorés
+  # Si true : ils sont complétés avec du silence
+  pad_short_files: false
+
+  # Normalisation volume
+  normalize_rms: true
+  target_rms_db: -25.0
+  max_gain_db: 20.0
+  peak_limit: 0.98
+
+  # Silence / fichiers inutiles
+  min_duration_sec: 3.0
+  silence_threshold_db: -50.0
+  min_non_silent_ratio: 0.05
+
+  # Performance
+  max_workers: 1
+  skip_existing: true
+
+  # Formats acceptés en entrée
+  allowed_extensions:
+    - ".wav"
+    - ".mp3"
+    - ".flac"
+    - ".ogg"
+    - ".m4a"
+    - ".aac"
+
+
+
+noise_preprocessing:
+  input_dir: "G:/.shortcut-targets-by-id/1z2M8g6Bhqr235VfNU5aKKxSQm8EQAQ94/Filtre-Voix-DL/data/jules/noise/free-sound"
+  output_dir: "data/processed/noise_chunks"
+  metadata_dir: "data/metadata"
+  logs_dir: "data/logs"
+
+  sample_rate: 16000
+  mono: true
+  chunk_duration_sec: 3.0
+
+  max_files: 20
+  shuffle_files: true
+  random_seed: 42
+
+  # Pour les bruits, répéter un fichier court est acceptable
+  repeat_short_files: true
+
+  min_duration_sec: 0.5
+  silence_threshold_db: -60.0
+  min_non_silent_ratio: 0.03
+
+  peak_limit: 0.98
+
+  max_workers: 1
+  skip_existing: true
+
+  allowed_extensions:
+    - ".wav"
+    - ".mp3"
+    - ".flac"
+    - ".ogg"
+    - ".m4a"
+    - ".aac"
+
+
+
+generation:
+  clean_dir: "data/processed/clean_chunks"
+  noise_dir: "data/processed/noise_chunks"
+
+  output_dir: "data/processed/generated"
+  metadata_dir: "data/metadata"
+  logs_dir: "data/logs"
+
+  sample_rate: 16000
+  duration_sec: 3.0
+
+  num_train_samples: 100
+  num_val_samples: 20
+  num_test_samples: 20
+
+  snr_min_db: -5.0
+  snr_max_db: 20.0
+
+  min_clean_rms_db: -45.0
+  min_noise_rms_db: -60.0
+
+  peak_limit: 0.98
+  avoid_clipping: true
+  apply_gain_to_target: true
+
+  batch_size: 16
+  max_workers: 1
+
+  seed: 42
+  deterministic: true
+  skip_existing: true
+
+  save_noise: false
+
+  apply_clean_augment: false
+  apply_noise_augment: false
+
+  apply_post_noisy_augment: false
+  post_noisy_augment_probability: 0.10
+
+  allowed_extensions:
+    - ".wav"
+
+
+
+augmentations:
+  enabled: true
+
+  p_gain: 0.35
+  p_eq: 0.25
+  p_compression: 0.20
+  p_saturation: 0.12
+  p_clipping: 0.04
+  p_phone_filter: 0.08
+  p_reverb: 0.12
+  p_codec: 0.06
+  p_dropout: 0.03
+  p_quantization: 0.05
