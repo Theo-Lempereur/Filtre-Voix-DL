@@ -40,24 +40,30 @@ def save_checkpoint(
     run_id: str,
     config: dict,
     history: dict,
+    best_val_si_sdri: float = float("-inf"),
 ) -> None:
     """Sauvegarde atomique d'un checkpoint complet.
 
     `epoch` est le numéro de la dernière epoch terminée (1-indexed côté
     notebook : si epoch=3 alors les epochs 1, 2 et 3 ont été jouées).
+
+    `best_val_si_sdri` est le meilleur SI-SDRi observé sur la val. Par défaut
+    `-inf` pour la rétrocompatibilité (anciens appels qui ne passent pas le
+    paramètre se comportent comme avant côté sauvegarde).
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     payload = {
-        "model_state":     model.state_dict(),
-        "optimizer_state": optimizer.state_dict() if optimizer is not None else None,
-        "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
-        "epoch":           int(epoch),
-        "best_val_loss":   float(best_val_loss),
-        "run_id":          run_id,
-        "config":          dict(config),
-        "history":         dict(history),
+        "model_state":        model.state_dict(),
+        "optimizer_state":    optimizer.state_dict() if optimizer is not None else None,
+        "scheduler_state":    scheduler.state_dict() if scheduler is not None else None,
+        "epoch":              int(epoch),
+        "best_val_loss":      float(best_val_loss),
+        "best_val_si_sdri":   float(best_val_si_sdri),
+        "run_id":             run_id,
+        "config":             dict(config),
+        "history":            dict(history),
     }
 
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -94,14 +100,21 @@ def load_checkpoint(
     if optimizer is not None and payload.get("optimizer_state") is not None:
         optimizer.load_state_dict(payload["optimizer_state"])
     if scheduler is not None and payload.get("scheduler_state") is not None:
-        scheduler.load_state_dict(payload["scheduler_state"])
+        try:
+            scheduler.load_state_dict(payload["scheduler_state"])
+        except (KeyError, TypeError, ValueError) as e:
+            # Format de scheduler différent (ex : ancien ReduceLROnPlateau
+            # vers nouveau DualMetricPlateauScheduler). On garde le scheduler
+            # fraîchement initialisé plutôt que de planter.
+            print(f"[checkpoint] scheduler_state incompatible, ignoré ({e}).")
 
     return {
-        "epoch":         int(payload.get("epoch", 0)),
-        "best_val_loss": float(payload.get("best_val_loss", float("inf"))),
-        "run_id":        payload.get("run_id", ""),
-        "config":        dict(payload.get("config", {})),
-        "history":       dict(payload.get("history", {})),
+        "epoch":            int(payload.get("epoch", 0)),
+        "best_val_loss":    float(payload.get("best_val_loss", float("inf"))),
+        "best_val_si_sdri": float(payload.get("best_val_si_sdri", float("-inf"))),
+        "run_id":           payload.get("run_id", ""),
+        "config":           dict(payload.get("config", {})),
+        "history":          dict(payload.get("history", {})),
     }
 
 
