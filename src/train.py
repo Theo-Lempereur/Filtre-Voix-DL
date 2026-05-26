@@ -281,7 +281,40 @@ def train(
 
     `max_train_samples` / `max_val_samples` permettent les mini-entraînements
     pédagogiques (notebook 03) sans toucher au reste du code.
+
+    À la reprise (``resume_from`` non None), la config sauvegardée dans le
+    checkpoint sert de baseline et le dict ``config`` passé en argument la
+    surcharge. Permet de reprendre un run en ne re-spécifiant que les flags
+    qu'on veut changer (ex: bumper ``num_epochs`` ou baisser ``lr``), sans
+    perdre les autres hyperparamètres (ex: ``batch_size``).
     """
+    # `config` reçu = uniquement les overrides explicites de l'appelant (CLI ou
+    # notebook). Si on reprend, on charge d'abord la config sauvegardée comme
+    # baseline ; les overrides passent par-dessus.
+    user_overrides = dict(config)
+    if resume_from:
+        saved_config = ckpt_io.peek_checkpoint_config(resume_from)
+        if saved_config:
+            base = dict(saved_config)
+            base.update(user_overrides)
+            config = base
+            # Repère les valeurs surchargées par rapport au checkpoint pour
+            # informer l'utilisateur (utile pour debug "pourquoi c'est rapide").
+            overridden = {
+                k: (saved_config.get(k), user_overrides[k])
+                for k in user_overrides
+                if k in saved_config and saved_config[k] != user_overrides[k]
+            }
+            if overridden:
+                print("[train] config restaurée depuis le checkpoint, "
+                      "surcharges CLI :")
+                for k, (old, new) in overridden.items():
+                    print(f"  {k}: {old} -> {new}")
+            else:
+                print("[train] config restaurée à l'identique depuis le checkpoint.")
+        else:
+            config = user_overrides
+
     config = _resolve_config(config)
     run_id = config.get("run_id") or time.strftime("run-%Y%m%d-%H%M%S")
     config["run_id"] = run_id

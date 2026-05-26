@@ -105,6 +105,18 @@ def load_checkpoint(
     }
 
 
+def peek_checkpoint_config(path: str | os.PathLike) -> dict:
+    """Lit uniquement le dict ``config`` d'un checkpoint, sans restaurer le modèle.
+
+    Utile à la reprise : on récupère les hyperparamètres d'origine pour les
+    réutiliser, AVANT de construire le modèle / l'optimizer (qui dépendent
+    de ces hyperparamètres).
+    """
+    path = Path(path)
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    return dict(payload.get("config", {}))
+
+
 # ---------------------------------------------------------------------------
 # Recherche et rotation
 # ---------------------------------------------------------------------------
