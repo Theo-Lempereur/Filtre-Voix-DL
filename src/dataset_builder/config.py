@@ -2,6 +2,18 @@ from dataclasses import dataclass
 from pathlib import Path
 import yaml
 
+from src import config as project_config
+
+
+def _expand_drive_project(value: str) -> str:
+    """Substitue ``${DRIVE_PROJECT}`` par ``src.config.DRIVE_PROJECT``.
+
+    Permet de pointer les sources brutes dans le YAML sans coder en dur de
+    chemin spécifique à une machine (Drive Desktop Win/Mac/Linux ou Colab
+    sont résolus automatiquement par ``src.config``).
+    """
+    return value.replace("${DRIVE_PROJECT}", project_config.DRIVE_PROJECT)
+
 
 @dataclass
 class CleanPreprocessingConfig:
@@ -85,7 +97,7 @@ def load_clean_config(config_path: str | Path) -> CleanPreprocessingConfig:
     cfg = raw["clean_preprocessing"]
 
     def resolve_path(path_value: str) -> Path:
-        path = Path(path_value)
+        path = Path(_expand_drive_project(path_value))
         if path.is_absolute():
             return path
         return project_root / path
@@ -202,7 +214,7 @@ def load_noise_config(config_path: str | Path) -> NoisePreprocessingConfig:
     cfg = raw["noise_preprocessing"]
 
     def resolve_path(path_value: str) -> Path:
-        path = Path(path_value)
+        path = Path(_expand_drive_project(path_value))
         if path.is_absolute():
             return path
         return project_root / path
@@ -280,6 +292,12 @@ class DatasetGenerationConfig:
     apply_post_noisy_augment: bool = False
     post_noisy_augment_probability: float = 0.10
 
+    # Isolation des sources entre splits : si True, partitionne les chunks
+    # clean et noise sources en 3 sous-pools disjoints (train/val/test) selon
+    # ``split_ratios`` avant la génération. Évite la fuite train→test.
+    enforce_split_isolation: bool = True
+    split_ratios: tuple = (0.8, 0.1, 0.1)
+
     allowed_extensions: tuple = (".wav",)
 
     @property
@@ -315,6 +333,8 @@ class DatasetGenerationConfig:
             "apply_noise_augment": self.apply_noise_augment,
             "apply_post_noisy_augment": self.apply_post_noisy_augment,
             "post_noisy_augment_probability": self.post_noisy_augment_probability,
+            "enforce_split_isolation": self.enforce_split_isolation,
+            "split_ratios": list(self.split_ratios),
             "allowed_extensions": list(self.allowed_extensions),
         }
 
@@ -333,7 +353,7 @@ def load_generation_config(config_path: str | Path) -> DatasetGenerationConfig:
     cfg = raw["generation"]
 
     def resolve_path(path_value: str) -> Path:
-        path = Path(path_value)
+        path = Path(_expand_drive_project(path_value))
         if path.is_absolute():
             return path
         return project_root / path
@@ -376,6 +396,11 @@ def load_generation_config(config_path: str | Path) -> DatasetGenerationConfig:
         apply_post_noisy_augment=bool(cfg.get("apply_post_noisy_augment", False)),
         post_noisy_augment_probability=float(
             cfg.get("post_noisy_augment_probability", 0.10)
+        ),
+
+        enforce_split_isolation=bool(cfg.get("enforce_split_isolation", True)),
+        split_ratios=tuple(
+            float(r) for r in cfg.get("split_ratios", (0.8, 0.1, 0.1))
         ),
 
         allowed_extensions=tuple(

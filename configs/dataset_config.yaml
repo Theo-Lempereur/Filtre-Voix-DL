@@ -1,18 +1,22 @@
 clean_preprocessing:
-  input_dir: "G:/.shortcut-targets-by-id/1z2M8g6Bhqr235VfNU5aKKxSQm8EQAQ94/Filtre-Voix-DL/data/jules/wav"
+  # ${DRIVE_PROJECT} est résolu à l'exécution par src.dataset_builder.config
+  # vers la racine du Drive partagé (G:/Mon Drive/Filtre-Voix-DL sur Windows
+  # avec Drive Desktop, /content/drive/MyDrive/Filtre-Voix-DL sur Colab, etc).
+  input_dir: "${DRIVE_PROJECT}/data/jules/wav"
   output_dir: "data/processed/clean_chunks"
   metadata_dir: "data/metadata"
   logs_dir: "data/logs"
 
   sample_rate: 16000
   mono: true
-  chunk_duration_sec: 3.0
+  chunk_duration_sec: 4.0
 
-  max_files: 30
+  # null = consommer tous les fichiers sources disponibles
+  max_files: null
   shuffle_files: true
   random_seed: 42
 
-  # Si false : les fichiers < 3 sec sont ignorés
+  # Si false : les fichiers < 4 sec sont ignorés
   # Si true : ils sont complétés avec du silence
   pad_short_files: false
 
@@ -23,12 +27,12 @@ clean_preprocessing:
   peak_limit: 0.98
 
   # Silence / fichiers inutiles
-  min_duration_sec: 3.0
+  min_duration_sec: 4.0
   silence_threshold_db: -50.0
   min_non_silent_ratio: 0.05
 
   # Performance
-  max_workers: 1
+  max_workers: 8
   skip_existing: true
 
   # Formats acceptés en entrée
@@ -43,16 +47,16 @@ clean_preprocessing:
 
 
 noise_preprocessing:
-  input_dir: "G:/.shortcut-targets-by-id/1z2M8g6Bhqr235VfNU5aKKxSQm8EQAQ94/Filtre-Voix-DL/data/jules/noise/free-sound"
+  input_dir: "${DRIVE_PROJECT}/data/jules/noise/free-sound"
   output_dir: "data/processed/noise_chunks"
   metadata_dir: "data/metadata"
   logs_dir: "data/logs"
 
   sample_rate: 16000
   mono: true
-  chunk_duration_sec: 3.0
+  chunk_duration_sec: 4.0
 
-  max_files: 20
+  max_files: null
   shuffle_files: true
   random_seed: 42
 
@@ -65,7 +69,7 @@ noise_preprocessing:
 
   peak_limit: 0.98
 
-  max_workers: 1
+  max_workers: 8
   skip_existing: true
 
   allowed_extensions:
@@ -87,11 +91,11 @@ generation:
   logs_dir: "data/logs"
 
   sample_rate: 16000
-  duration_sec: 3.0
+  duration_sec: 4.0
 
-  num_train_samples: 100
-  num_val_samples: 20
-  num_test_samples: 20
+  num_train_samples: 16000
+  num_val_samples: 2000
+  num_test_samples: 2000
 
   snr_min_db: -5.0
   snr_max_db: 20.0
@@ -103,8 +107,8 @@ generation:
   avoid_clipping: true
   apply_gain_to_target: true
 
-  batch_size: 16
-  max_workers: 1
+  batch_size: 64
+  max_workers: 8
 
   seed: 42
   deterministic: true
@@ -117,6 +121,12 @@ generation:
 
   apply_post_noisy_augment: false
   post_noisy_augment_probability: 0.10
+
+  # Partitionne les chunks sources en 3 sous-pools disjoints (train/val/test)
+  # avant tirage, pour éviter qu'un même chunk clean/noise serve à la fois
+  # à l'entraînement et à l'évaluation. Ratios = (train, val, test).
+  enforce_split_isolation: true
+  split_ratios: [0.8, 0.1, 0.1]
 
   allowed_extensions:
     - ".wav"

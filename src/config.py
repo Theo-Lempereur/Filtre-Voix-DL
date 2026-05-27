@@ -72,19 +72,31 @@ def ensure_project_root() -> str:
 # --- Racine du projet (Colab ou Drive Desktop local) ---
 DRIVE_PROJECT = _detect_project_root()
 
+# Racine du dépôt git (le fichier vit dans <repo>/src/config.py). Sert
+# d'ancre pour les artefacts volumineux et re-générables (dataset) qu'on ne
+# veut pas synchroniser sur Drive — contrairement aux checkpoints/logs qui
+# sont partagés via DRIVE_PROJECT.
+REPO_ROOT = str(Path(__file__).resolve().parents[1])
+
 # Dataset principal : paires (voix bruitée, voix propre) fournies par le dataset public
 # Ces deux dossiers restent pour les notebooks d'exploration (00, 01, 02).
 DATA_CLEAN = os.path.join(DRIVE_PROJECT, "data/clean")   # version propre des enregistrements
 DATA_NOISY = os.path.join(DRIVE_PROJECT, "data/noisy")   # version bruitée des mêmes enregistrements
 
 # Split train / val / test — utilisé pour l'entraînement et l'évaluation.
-# La répartition est effectuée une seule fois (cf. scripts/split_data ou notebook 04).
-DATA_TRAIN_CLEAN = os.path.join(DRIVE_PROJECT, "data/train/clean")
-DATA_TRAIN_NOISY = os.path.join(DRIVE_PROJECT, "data/train/noisy")
-DATA_VAL_CLEAN   = os.path.join(DRIVE_PROJECT, "data/val/clean")
-DATA_VAL_NOISY   = os.path.join(DRIVE_PROJECT, "data/val/noisy")
-DATA_TEST_CLEAN  = os.path.join(DRIVE_PROJECT, "data/test/clean")
-DATA_TEST_NOISY  = os.path.join(DRIVE_PROJECT, "data/test/noisy")
+# Pointe vers les paires bruité/propre générées par le pipeline de dataset
+# (cf. scripts/run_full_pipeline.py + configs/dataset_config.yaml). Les
+# fichiers portent le même nom dans noisy/ et clean/ (ex: train_00000042.wav),
+# ce qui matche le mode "name" de PairedAudioDataset.list_pairs(). Vit dans
+# le repo (relatif à REPO_ROOT) car ~5 GB et reproductible via le pipeline —
+# inutile de saturer Drive avec ça.
+_GENERATED_ROOT = os.path.join(REPO_ROOT, "data/processed/generated")
+DATA_TRAIN_CLEAN = os.path.join(_GENERATED_ROOT, "train/clean")
+DATA_TRAIN_NOISY = os.path.join(_GENERATED_ROOT, "train/noisy")
+DATA_VAL_CLEAN   = os.path.join(_GENERATED_ROOT, "val/clean")
+DATA_VAL_NOISY   = os.path.join(_GENERATED_ROOT, "val/noisy")
+DATA_TEST_CLEAN  = os.path.join(_GENERATED_ROOT, "test/clean")
+DATA_TEST_NOISY  = os.path.join(_GENERATED_ROOT, "test/noisy")
 
 # Sorties de l'entraînement et de l'inférence
 CHECKPOINTS = os.path.join(DRIVE_PROJECT, "checkpoints")
