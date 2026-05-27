@@ -23,3 +23,6 @@ wandb==0.26.1
 # Notebook + dev
 ipykernel==6.17.1
 nbstripout==0.7.1
+
+# Interface graphique (orchestration des trainings)
+PySide6==6.8.0

@@ -33,6 +33,7 @@ from torch.utils.data import DataLoader, Subset
 
 from . import config as cfg
 from . import checkpoint as ckpt_io
+from . import stop_signal
 from .dataset import PairedAudioDataset
 from .lock import TrainingLock, LockStolenError
 from .logging_utils import Logger
@@ -50,6 +51,10 @@ from .scheduler import DualMetricPlateauScheduler
 # nettement plus court que `src.lock.STALE_AFTER_SECONDS` (300 s) pour qu'une
 # session active ne soit jamais considérée comme morte.
 _LOCK_HEARTBEAT_SECONDS = 60
+
+
+class _StopRequested(Exception):
+    """Levée depuis la boucle de training quand le flag stop est détecté."""
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +150,7 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
                      save_fn=None,
                      heartbeat_fn=None,
                      heartbeat_every_seconds: float = 0.0,
+                     stop_check_fn=None,
                      global_step_start: int = 0) -> tuple[float, int]:
     """Une epoch complète d'entraînement.
 
@@ -167,6 +173,12 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
     last_heartbeat_at = time.time()
 
     for batch in loader:
+        # Stop demandé depuis l'extérieur (GUI / utilitaire) : on sort proprement
+        # avant de consommer ce batch. Le `finally` du caller sauvegardera
+        # `last.pt` via _intra_save.
+        if stop_check_fn is not None and stop_check_fn():
+            raise _StopRequested()
+
         noisy = batch["noisy_mag"].to(device, non_blocking=True)
         clean = batch["clean_mag"].to(device, non_blocking=True)
 
@@ -461,22 +473,35 @@ def _train_locked(
             run_id=run_id, config=config, history=history,
         )
 
+    # Au démarrage on nettoie un éventuel flag rémanent (run précédent avec le
+    # même run_id qui aurait crashé sans clear). Sinon le training s'arrêterait
+    # immédiatement à la première itération.
+    stop_signal.clear_stop_flag(run_id)
+
+    stop_was_requested = False
     try:
         for epoch in range(start_epoch + 1, config["num_epochs"] + 1):
             t0 = time.time()
 
-            train_loss, global_step = _train_one_epoch(
-                model, train_loader, optimizer, device,
-                grad_clip_norm=config["grad_clip_norm"],
-                epoch=epoch,
-                logger=logger,
-                log_every=config["intra_epoch_log_every"],
-                save_every_seconds=config["intra_epoch_save_seconds"],
-                save_fn=_intra_save,
-                heartbeat_fn=lock.heartbeat,
-                heartbeat_every_seconds=_LOCK_HEARTBEAT_SECONDS,
-                global_step_start=global_step,
-            )
+            try:
+                train_loss, global_step = _train_one_epoch(
+                    model, train_loader, optimizer, device,
+                    grad_clip_norm=config["grad_clip_norm"],
+                    epoch=epoch,
+                    logger=logger,
+                    log_every=config["intra_epoch_log_every"],
+                    save_every_seconds=config["intra_epoch_save_seconds"],
+                    save_fn=_intra_save,
+                    heartbeat_fn=lock.heartbeat,
+                    heartbeat_every_seconds=_LOCK_HEARTBEAT_SECONDS,
+                    stop_check_fn=lambda: stop_signal.is_stop_requested(run_id),
+                    global_step_start=global_step,
+                )
+            except _StopRequested:
+                stop_was_requested = True
+                print(f"[train] stop demandé via flag, sauvegarde de last.pt puis exit.")
+                _intra_save(global_step)
+                break
             val_metrics = _validate(model, val_loader, device)
             lr_reduced = scheduler.step(
                 val_metrics["val_loss"], val_metrics["val_si_sdri"]
@@ -590,6 +615,12 @@ def _train_locked(
                 break
     finally:
         logger.finish()
+        # Nettoyage du flag, qu'il ait été consommé (stop demandé) ou non
+        # (fin normale après early stop / num_epochs).
+        stop_signal.clear_stop_flag(run_id)
 
-    print(f"[train] terminé. best_val={best_val:.6f}  ckpt_dir={ckpt_dir}")
+    if stop_was_requested:
+        print(f"[train] arrêté à la demande de l'utilisateur. ckpt_dir={ckpt_dir}")
+    else:
+        print(f"[train] terminé. best_val={best_val:.6f}  ckpt_dir={ckpt_dir}")
     return history
