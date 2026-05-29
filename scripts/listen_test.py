@@ -129,11 +129,21 @@ def pick_pairs(n: int, seed: int) -> list[tuple[str, str, str]]:
 
 @torch.no_grad()
 def denoise(model: UNet, noisy_wav: np.ndarray, device: torch.device) -> np.ndarray:
-    """noisy_wav (4 s, 64000 samples) -> wav prédit (même longueur)."""
+    """noisy_wav (4 s, 64000 samples) -> wav prédit (même longueur).
+
+    Recette p2 figée :
+      - entrée du réseau : `log1p(noisy_mag)`
+      - masque réel `sigmoid × noisy_mag` (sortie du modèle)
+      - reconstruction ISTFT avec la phase du noisy
+    """
     spec = audio.stft(noisy_wav)
     mag, phase = audio.magnitude_phase(spec)
-    mag_t = torch.from_numpy(mag).float().unsqueeze(0).unsqueeze(0).to(device)  # (1,1,F,T)
-    pred_mag = model(mag_t).squeeze(0).squeeze(0).cpu().numpy()
+    mag_t = torch.from_numpy(mag).float().unsqueeze(0).unsqueeze(0).to(device)   # (1,1,F,T)
+
+    model_in = torch.log1p(mag_t)
+    pred_mag_t = model(model_in, mag_t)
+
+    pred_mag = pred_mag_t.squeeze(0).squeeze(0).cpu().numpy()
     return audio.reconstruct(pred_mag, phase, length=cfg.CLIP_SAMPLES)
 
 
@@ -151,8 +161,8 @@ def main() -> int:
 
     ckpt_cfg = peek_checkpoint_config(ckpt_path)
     base_channels = int(ckpt_cfg.get("base_channels", cfg.BASE_CHANNELS))
-
-    model = UNet(base_channels=base_channels).to(device)
+    norm_groups = int(ckpt_cfg.get("norm_groups", cfg.NORM_GROUPS))
+    model = UNet(base_channels=base_channels, norm_groups=norm_groups).to(device)
     info = load_checkpoint(ckpt_path, model, device=device)
     model.eval()
     print(f"[ckpt] {ckpt_path.name} | epoch={info['epoch']} "

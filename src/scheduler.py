@@ -157,3 +157,99 @@ class DualMetricPlateauScheduler:
         self._loss_plateau   = int(state.get("loss_plateau", 0))
         self._sdri_plateau   = int(state.get("sdri_plateau", 0))
         self._num_reductions = int(state.get("num_reductions", 0))
+
+
+# ---------------------------------------------------------------------------
+# Warmup linéaire optionnel — wrapping du scheduler principal
+# ---------------------------------------------------------------------------
+
+class WarmupWrapper:
+    """Warmup linéaire du LR sur N epochs, puis délègue au scheduler interne.
+
+    Pendant les `warmup_epochs` premières epochs, le LR monte linéairement de
+    `warmup_start_factor * base_lr` jusqu'à `base_lr`. Ensuite, on bascule sur
+    le scheduler enveloppé (typiquement `DualMetricPlateauScheduler`).
+
+    Si `warmup_epochs == 0`, le wrapper est totalement transparent : il forward
+    chaque appel à l'inner sans rien faire. C'est le comportement par défaut
+    pour préserver la rétrocompatibilité.
+
+    API conservée :
+      - `step(val_loss, val_si_sdri)` → bool (True si LR vient de baisser)
+      - `state_dict()` / `load_state_dict()` (compose avec celui de l'inner)
+      - `get_last_lr()`
+    """
+
+    def __init__(self,
+                 inner: "DualMetricPlateauScheduler",
+                 optimizer: torch.optim.Optimizer,
+                 warmup_epochs: int = 0,
+                 warmup_start_factor: float = 0.1):
+        self.inner = inner
+        self.optimizer = optimizer
+        self.warmup_epochs = int(warmup_epochs)
+        self.warmup_start_factor = float(warmup_start_factor)
+        # On capture le LR de base pour pouvoir reconstruire la rampe.
+        self._base_lrs: list[float] = [g["lr"] for g in optimizer.param_groups]
+        self._current_epoch: int = 0
+        # Si warmup activé, on positionne directement le LR de départ.
+        if self.warmup_epochs > 0:
+            self._apply_warmup_lr(epoch=0)
+
+    def _apply_warmup_lr(self, epoch: int) -> None:
+        # Ramp linéaire : f(0) = start_factor, f(warmup_epochs) = 1.0
+        frac = (epoch + 1) / max(self.warmup_epochs, 1)
+        factor = self.warmup_start_factor + (1.0 - self.warmup_start_factor) * min(frac, 1.0)
+        for g, base in zip(self.optimizer.param_groups, self._base_lrs):
+            g["lr"] = base * factor
+
+    def step(self, val_loss: float, val_si_sdri: float) -> bool:
+        """Avance d'une epoch. Pendant le warmup, ne consulte pas l'inner.
+
+        Retourne True si une réduction de LR vient d'être faite (inner uniquement).
+        """
+        self._current_epoch += 1
+        if self._current_epoch <= self.warmup_epochs:
+            self._apply_warmup_lr(self._current_epoch - 1)
+            return False
+        # Après warmup : l'inner prend la main.
+        return self.inner.step(val_loss, val_si_sdri)
+
+    def get_last_lr(self) -> list[float]:
+        return [g["lr"] for g in self.optimizer.param_groups]
+
+    @property
+    def loss_plateau_epochs(self) -> int:
+        return self.inner.loss_plateau_epochs
+
+    @property
+    def sdri_plateau_epochs(self) -> int:
+        return self.inner.sdri_plateau_epochs
+
+    @property
+    def num_reductions(self) -> int:
+        return self.inner.num_reductions
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "version":         1,
+            "warmup_epochs":   self.warmup_epochs,
+            "current_epoch":   self._current_epoch,
+            "base_lrs":        list(self._base_lrs),
+            "inner":           self.inner.state_dict(),
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        if not isinstance(state, dict):
+            return
+        # Format wrapper : on reconnaît la présence de la clé "inner".
+        if "inner" in state and isinstance(state["inner"], dict):
+            self._current_epoch = int(state.get("current_epoch", 0))
+            base_lrs = state.get("base_lrs")
+            if isinstance(base_lrs, list) and base_lrs:
+                self._base_lrs = [float(x) for x in base_lrs]
+            self.inner.load_state_dict(state["inner"])
+            return
+        # Format ancien : c'est l'état direct de l'inner (avant que WarmupWrapper
+        # existe). On le délègue tel quel à l'inner.
+        self.inner.load_state_dict(state)

@@ -38,13 +38,15 @@ from .dataset import PairedAudioDataset
 from .lock import TrainingLock, LockStolenError
 from .logging_utils import Logger
 from .metrics import (
-    magnitude_mse_loss,
     si_sdr_mag,
+    si_sdr_wav,
     mask_statistics,
+    build_loss,
+    loss_requires_waveform,
     OverfitMonitor,
 )
 from .model import UNet
-from .scheduler import DualMetricPlateauScheduler
+from .scheduler import DualMetricPlateauScheduler, WarmupWrapper
 
 
 # Fréquence de rafraîchissement du heartbeat du lock (en secondes). Doit être
@@ -110,18 +112,38 @@ def _resolve_config(user_config: dict) -> dict:
         # Sauvegarde et log intra-epoch (anti-coupure Colab)
         "intra_epoch_save_seconds": cfg.INTRA_EPOCH_SAVE_SECONDS,
         "intra_epoch_log_every":    cfg.INTRA_EPOCH_LOG_EVERY,
+        # --- Recette p2 (figée + modifiables) ---
+        # Le reste de la recette (input_repr=log1p, GroupNorm, AdamW, masque
+        # sigmoid) est figé dans le code et ne passe pas par la config.
+        "loss_weights":        dict(cfg.LOSS_WEIGHTS),
+        "mr_stft_fft_sizes":   list(cfg.MR_STFT_FFT_SIZES),
+        "norm_groups":         cfg.NORM_GROUPS,
+        "lr_warmup_epochs":    cfg.LR_WARMUP_EPOCHS,
     }
     return {**defaults, **dict(user_config)}
 
 
+def _build_optimizer(model: torch.nn.Module, config: dict) -> torch.optim.Optimizer:
+    """Construit AdamW (figé pour la baseline p2).
+
+    AdamW applique correctement le weight decay comme régularisation découplée
+    — recommandé à 1e-4 avec GroupNorm pour stabiliser l'entraînement.
+    """
+    lr = float(config["lr"])
+    wd = float(config.get("weight_decay", 0.0))
+    return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+
+
 def _build_loader(noisy_dir: str, clean_dir: str, *, batch_size: int,
                   num_workers: int, shuffle: bool, crop_mode: str,
-                  max_samples: int | None) -> DataLoader:
+                  max_samples: int | None,
+                  return_waveform: bool = False) -> DataLoader:
     ds: torch.utils.data.Dataset = PairedAudioDataset(
         noisy_dir=noisy_dir,
         clean_dir=clean_dir,
         crop_mode=crop_mode,
         return_spectrogram=True,
+        return_waveform=return_waveform,
     )
     if max_samples is not None and max_samples < len(ds):
         # Subset déterministe (sans random ici : on prend les N premiers triés)
@@ -138,12 +160,79 @@ def _build_loader(noisy_dir: str, clean_dir: str, *, batch_size: int,
 
 
 # ---------------------------------------------------------------------------
+# Factory du forward (compression log1p figée + ISTFT optionnelle pour MR-STFT)
+# ---------------------------------------------------------------------------
+
+def _build_forward_fn(model, config: dict, *, needs_waveform: bool):
+    """Renvoie une fonction `forward_fn(batch, device) -> dict`.
+
+    Le dict retourné contient au minimum :
+      pred_mag, clean_mag, noisy_mag
+    Et, si `needs_waveform` (MR-STFT loss active) :
+      pred_wav, clean_wav, noisy_wav
+
+    L'entrée du réseau est toujours `log1p(noisy_mag)` (compression p2 figée).
+    Le masque s'applique à la magnitude linéaire originale.
+    """
+    def _istft(mag: torch.Tensor, phase: torch.Tensor, length: int) -> torch.Tensor:
+        """ISTFT différentiable : combine magnitude prédite + phase noisy."""
+        # (B, 1, F, T) → (B, F, T)
+        if mag.dim() == 4 and mag.shape[1] == 1:
+            mag = mag.squeeze(1)
+        spec = torch.complex(mag * torch.cos(phase), mag * torch.sin(phase))
+        n_fft = cfg.N_FFT
+        hop   = cfg.HOP_LENGTH
+        window = torch.hann_window(n_fft, device=spec.device, dtype=spec.real.dtype)
+        return torch.istft(spec, n_fft=n_fft, hop_length=hop, win_length=n_fft,
+                           window=window, length=length, return_complex=False)
+
+    def forward_fn(batch, device):
+        noisy_mag   = batch["noisy_mag"].to(device, non_blocking=True)
+        clean_mag   = batch["clean_mag"].to(device, non_blocking=True)
+        noisy_phase = batch["noisy_phase"].to(device, non_blocking=True)
+
+        # Compression log1p : rend la distribution plus gaussienne en entrée
+        # du réseau. La cible reste linéaire pour conserver la sémantique
+        # du masque sigmoid × noisy_mag.
+        model_input = torch.log1p(noisy_mag)
+
+        # Le masque s'applique à la magnitude originale (non compressée).
+        pred_mag = model(model_input, noisy_mag)
+        pred_wav = None
+        if needs_waveform:
+            pred_wav = _istft(pred_mag, noisy_phase, length=cfg.CLIP_SAMPLES)
+
+        out = {
+            "pred_mag":  pred_mag,
+            "clean_mag": clean_mag,
+            "noisy_mag": noisy_mag,
+        }
+        if pred_wav is not None:
+            # `clean_wav` / `noisy_wav` ne sont fournis par le dataset que si
+            # `return_waveform=True` côté DataLoader.
+            clean_wav = batch.get("clean_wav")
+            noisy_wav = batch.get("noisy_wav")
+            if clean_wav is not None:
+                clean_wav = clean_wav.to(device, non_blocking=True)
+            if noisy_wav is not None:
+                noisy_wav = noisy_wav.to(device, non_blocking=True)
+            out["pred_wav"]  = pred_wav
+            out["clean_wav"] = clean_wav
+            out["noisy_wav"] = noisy_wav
+        return out
+
+    return forward_fn
+
+
+# ---------------------------------------------------------------------------
 # Une epoch d'entraînement / une epoch de validation
 # ---------------------------------------------------------------------------
 
 def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
                      *,
                      epoch: int,
+                     loss_fn,
+                     forward_fn,
                      logger=None,
                      log_every: int = 0,
                      save_every_seconds: float = 0.0,
@@ -179,12 +268,12 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
         if stop_check_fn is not None and stop_check_fn():
             raise _StopRequested()
 
-        noisy = batch["noisy_mag"].to(device, non_blocking=True)
-        clean = batch["clean_mag"].to(device, non_blocking=True)
-
         optimizer.zero_grad(set_to_none=True)
-        pred = model(noisy)
-        loss = magnitude_mse_loss(pred, clean)
+        # `forward_fn` encapsule tout : déplacement device, forward modèle,
+        # éventuelle ISTFT pour produire pred_wav. Retourne le dict que
+        # `loss_fn` attend (au minimum pred_mag + clean_mag).
+        loss_batch = forward_fn(batch, device)
+        loss = loss_fn(loss_batch)
         loss.backward()
         if grad_clip_norm and grad_clip_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
@@ -239,20 +328,24 @@ def _train_one_epoch(model, loader, optimizer, device, grad_clip_norm,
 
 
 @torch.no_grad()
-def _validate(model, loader, device) -> dict[str, float]:
+def _validate(model, loader, device, *, loss_fn, forward_fn) -> dict[str, float]:
     model.eval()
     total_loss = 0.0
     total_sdr  = 0.0
     total_noisy_sdr = 0.0
+    total_sdr_wav = 0.0
+    total_noisy_sdr_wav = 0.0
+    have_wav = 0
     n_batches  = 0
     acc_mask = {"mean": 0.0, "std": 0.0, "min": 1.0, "max": 0.0}
     for batch in loader:
-        noisy = batch["noisy_mag"].to(device, non_blocking=True)
-        clean = batch["clean_mag"].to(device, non_blocking=True)
+        loss_batch = forward_fn(batch, device)
+        loss = loss_fn(loss_batch)
 
-        pred = model(noisy)
-        loss = magnitude_mse_loss(pred, clean)
-        sdr  = si_sdr_mag(pred, clean)
+        pred  = loss_batch["pred_mag"]
+        clean = loss_batch["clean_mag"]
+        noisy = loss_batch["noisy_mag"]
+        sdr   = si_sdr_mag(pred, clean)
         # Baseline : SI-SDR du signal bruité brut (sans passage par le modèle).
         # Le val set est en crop centré donc cette valeur est constante d'une
         # epoch à l'autre ; on la calcule quand même chaque fois pour avoir
@@ -264,6 +357,13 @@ def _validate(model, loader, device) -> dict[str, float]:
         total_noisy_sdr += float(noisy_sdr.item())
         n_batches  += 1
 
+        # SI-SDR waveform : seulement si les waveforms sont dispo dans le batch.
+        # Métrique perceptive de référence (vraie SI-SDR, pas approximée mag).
+        if loss_batch.get("pred_wav") is not None and loss_batch.get("clean_wav") is not None:
+            total_sdr_wav += float(si_sdr_wav(loss_batch["pred_wav"], loss_batch["clean_wav"]).item())
+            total_noisy_sdr_wav += float(si_sdr_wav(loss_batch["noisy_wav"], loss_batch["clean_wav"]).item())
+            have_wav += 1
+
         ms = mask_statistics(pred, noisy)
         acc_mask["mean"] += ms["mask_mean"]
         acc_mask["std"]  += ms["mask_std"]
@@ -273,7 +373,7 @@ def _validate(model, loader, device) -> dict[str, float]:
     n = max(n_batches, 1)
     val_si_sdr   = total_sdr / n
     noisy_si_sdr = total_noisy_sdr / n
-    return {
+    out: dict[str, float] = {
         "val_loss":     total_loss / n,
         "val_si_sdr":   val_si_sdr,
         "noisy_si_sdr": noisy_si_sdr,
@@ -283,6 +383,13 @@ def _validate(model, loader, device) -> dict[str, float]:
         "mask_min":   acc_mask["min"],
         "mask_max":   acc_mask["max"],
     }
+    if have_wav > 0:
+        wav_sdr = total_sdr_wav / have_wav
+        wav_noisy = total_noisy_sdr_wav / have_wav
+        out["val_si_sdr_wav"]   = wav_sdr
+        out["noisy_si_sdr_wav"] = wav_noisy
+        out["val_si_sdri_wav"]  = wav_sdr - wav_noisy
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -372,31 +479,49 @@ def _train_locked(
     print(f"[train] device={device} | run_id={run_id}")
 
     # --- Data ---
+    # On a besoin des waveforms (clean_wav) si la loss en a besoin (MR-STFT)
+    # — l'ISTFT côté prédiction est faite au forward.
+    need_wav = loss_requires_waveform(config)
     train_loader = _build_loader(
         config["train_noisy"], config["train_clean"],
         batch_size=config["batch_size"], num_workers=config["num_workers"],
         shuffle=True, crop_mode="random", max_samples=max_train_samples,
+        return_waveform=need_wav,
     )
     val_loader = _build_loader(
         config["val_noisy"], config["val_clean"],
         batch_size=config["batch_size"], num_workers=config["num_workers"],
         shuffle=False, crop_mode="center", max_samples=max_val_samples,
+        return_waveform=need_wav,
     )
     print(f"[train] batches : train={len(train_loader)}  val={len(val_loader)}")
 
     # --- Modèle / optim / scheduler ---
-    model = UNet(base_channels=config["base_channels"]).to(device)
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=config["lr"],
-        weight_decay=config["weight_decay"],
-    )
+    model = UNet(
+        base_channels=config["base_channels"],
+        norm_groups=config.get("norm_groups", 8),
+    ).to(device)
+    optimizer = _build_optimizer(model, config)
     # Scheduler hybride : on ne réduit le LR que si val_loss ET val_si_sdri
-    # plateauent toutes les deux (cf. src.scheduler).
-    scheduler = DualMetricPlateauScheduler(
+    # plateauent toutes les deux (cf. src.scheduler). Optionnellement enveloppé
+    # par un WarmupWrapper si `lr_warmup_epochs > 0` (no-op sinon).
+    inner_scheduler = DualMetricPlateauScheduler(
         optimizer,
         patience=config["lr_patience"],
         factor=config["lr_factor"],
     )
+    scheduler = WarmupWrapper(
+        inner=inner_scheduler,
+        optimizer=optimizer,
+        warmup_epochs=int(config.get("lr_warmup_epochs", 0) or 0),
+    )
+
+    # --- Factory de loss combinée (MSE + L1 compressed + MR-STFT) ---
+    loss_fn = build_loss(config)
+    needs_waveform = loss_requires_waveform(config)
+
+    # --- Factory de forward (log1p + ISTFT si MR-STFT actif) ---
+    forward_fn = _build_forward_fn(model, config, needs_waveform=needs_waveform)
 
     history: dict[str, list] = {
         "epoch": [], "train_loss": [], "val_loss": [], "val_si_sdr": [],
@@ -488,6 +613,8 @@ def _train_locked(
                     model, train_loader, optimizer, device,
                     grad_clip_norm=config["grad_clip_norm"],
                     epoch=epoch,
+                    loss_fn=loss_fn,
+                    forward_fn=forward_fn,
                     logger=logger,
                     log_every=config["intra_epoch_log_every"],
                     save_every_seconds=config["intra_epoch_save_seconds"],
@@ -502,7 +629,8 @@ def _train_locked(
                 print(f"[train] stop demandé via flag, sauvegarde de last.pt puis exit.")
                 _intra_save(global_step)
                 break
-            val_metrics = _validate(model, val_loader, device)
+            val_metrics = _validate(model, val_loader, device,
+                                    loss_fn=loss_fn, forward_fn=forward_fn)
             lr_reduced = scheduler.step(
                 val_metrics["val_loss"], val_metrics["val_si_sdri"]
             )
@@ -543,7 +671,7 @@ def _train_locked(
             if is_best_sdri:
                 best_val_si_sdri = val_metrics["val_si_sdri"]
 
-            logger.log(epoch, {
+            log_payload = {
                 "train_loss":     train_loss,
                 "val_loss":       val_metrics["val_loss"],
                 "val_si_sdr":     val_metrics["val_si_sdr"],
@@ -559,7 +687,13 @@ def _train_locked(
                 "is_best_sdri":   bool(is_best_sdri),
                 **flags,
                 "epoch_seconds":  time.time() - t0,
-            })
+            }
+            # Métriques waveform (vraies SI-SDR) si dispo (Phase 1+ avec MR-STFT
+            # ou Phase 4 cIRM). Précieuses pour suivre le ressenti perceptif.
+            for k in ("val_si_sdr_wav", "noisy_si_sdr_wav", "val_si_sdri_wav"):
+                if k in val_metrics:
+                    log_payload[k] = val_metrics[k]
+            logger.log(epoch, log_payload)
 
             if progress:
                 star = ""

@@ -36,17 +36,36 @@ from .param_spec import PARAM_SPECS, ParamKind, ParamSpec, by_name
 
 # Mapping des clés de la config sauvegardée (cf. src/train._resolve_config)
 # vers les noms de paramètres GUI. `use_wandb` est inclus parce qu'il est
-# persisté ; les autres clés (weight_decay, lr_patience, etc.) ne sont pas
+# persisté ; les autres clés (lr_patience, etc.) ne sont pas
 # exposées dans le formulaire et sont donc ignorées.
 _CKPT_KEY_TO_FORM = {
-    "num_epochs":    "epochs",
-    "batch_size":    "batch_size",
-    "lr":            "lr",
-    "num_workers":   "num_workers",
-    "base_channels": "base_channels",
-    "seed":          "seed",
-    "use_wandb":     "use_wandb",
+    "num_epochs":       "epochs",
+    "batch_size":       "batch_size",
+    "lr":               "lr",
+    "num_workers":      "num_workers",
+    "base_channels":    "base_channels",
+    "seed":             "seed",
+    "use_wandb":        "use_wandb",
+    # Recette p2 modifiable
+    "weight_decay":     "weight_decay",
+    "lr_warmup_epochs": "lr_warmup_epochs",
 }
+
+
+def _apply_ckpt_weights(form_widgets: dict, ckpt_cfg: dict, set_value) -> None:
+    """Reset spécifique pour loss_weights (dict nested → 3 champs)."""
+    weights = ckpt_cfg.get("loss_weights")
+    if not isinstance(weights, dict):
+        return
+    pairs = (
+        ("loss_w_mse",    weights.get("mse")),
+        ("loss_w_l1comp", weights.get("l1_comp")),
+        ("loss_w_mrstft", weights.get("mr_stft")),
+    )
+    for name, val in pairs:
+        if val is None or name not in form_widgets:
+            continue
+        set_value(name, val)
 
 
 def _make_widget(spec: ParamSpec) -> QWidget:
@@ -346,6 +365,8 @@ class ParamForm(QWidget):
             if ckpt_key not in ckpt_cfg:
                 continue
             self._set_widget_value(form_name, ckpt_cfg[ckpt_key])
+        # Restaure aussi les poids de loss combinée (dict → 4 widgets séparés).
+        _apply_ckpt_weights(self._widgets, ckpt_cfg, self._set_widget_value)
 
     def _set_widget_value(self, name: str, value: Any) -> None:
         spec_obj = by_name(name)

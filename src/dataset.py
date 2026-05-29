@@ -76,6 +76,9 @@ class PairedAudioDataset(Dataset):
     clip_samples        : nombre d'échantillons fixes à la sortie.
     crop_mode           : "center" / "random" / "start" (cf. audio.fix_length).
     return_spectrogram  : si True renvoie magnitude + phase ; sinon waveforms.
+    return_waveform     : si True ET return_spectrogram=True, retourne aussi
+                          `noisy_wav` et `clean_wav` (utilisé par les losses
+                          MR-STFT / SI-SDR temporel / cIRM).
     files               : optionnel, liste de noms de fichiers à utiliser (sinon tout).
     """
 
@@ -86,6 +89,7 @@ class PairedAudioDataset(Dataset):
                  clip_samples: int = config.CLIP_SAMPLES,
                  crop_mode: str = "random",
                  return_spectrogram: bool = True,
+                 return_waveform: bool = False,
                  pair_by: str = "auto",
                  files: Iterable[str] | None = None):
         self.noisy_dir = noisy_dir
@@ -94,6 +98,7 @@ class PairedAudioDataset(Dataset):
         self.clip_samples = clip_samples
         self.crop_mode = crop_mode
         self.return_spectrogram = return_spectrogram
+        self.return_waveform = return_waveform
 
         pairs = list_pairs(noisy_dir, clean_dir, pair_by=pair_by)
         if files is not None:
@@ -142,12 +147,18 @@ class PairedAudioDataset(Dataset):
             noisy_mag, noisy_phase = A.magnitude_phase(noisy_spec)
             clean_mag = np.abs(clean_spec)
 
-            return {
+            out = {
                 "name": name,
                 "noisy_mag": torch.from_numpy(noisy_mag).float().unsqueeze(0),
                 "clean_mag": torch.from_numpy(clean_mag).float().unsqueeze(0),
                 "noisy_phase": torch.from_numpy(noisy_phase).float(),
             }
+            if self.return_waveform:
+                # Utilisé par les losses domaine temporel (MR-STFT, SI-SDR wav)
+                # et par cIRM (qui a besoin du clean_wav pour la loss SI-SDR).
+                out["noisy_wav"] = torch.from_numpy(noisy).float()
+                out["clean_wav"] = torch.from_numpy(clean).float()
+            return out
 
         return {
             "name": name,

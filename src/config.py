@@ -133,8 +133,8 @@ WIN_LENGTH = 512             # longueur effective de la fenêtre
 # --- Hyperparamètres d'entraînement (valeurs par défaut, surchargeables) ---
 BATCH_SIZE     = 8           # tient sur un GPU T4 avec base_channels=32
 NUM_WORKERS    = 2           # Colab : éviter > 2 (RAM partagée)
-LR             = 1e-3        # Adam : 1e-3 est un bon point de départ
-WEIGHT_DECAY   = 0.0         # pas de régularisation L2 explicite en v1
+LR             = 1e-3        # AdamW : 1e-3 est un bon point de départ
+WEIGHT_DECAY   = 1e-4        # AdamW avec weight decay découplé (recommandé)
 NUM_EPOCHS     = 50          # plafond ; early stopping coupera plus tôt si besoin
 BASE_CHANNELS  = 32          # largeur du U-Net (≈7,85M params)
 SEED           = 42          # graine globale (torch, numpy, random)
@@ -158,3 +158,43 @@ INTRA_EPOCH_SAVE_SECONDS = 15 * 60   # 15 minutes
 # Log `train_loss_step` à wandb tous les N batches. Permet de voir la courbe
 # d'apprentissage dès les premières minutes, sans attendre la fin d'epoch.
 INTRA_EPOCH_LOG_EVERY    = 50        # batches
+
+
+# ---------------------------------------------------------------------------
+# Recette d'entraînement (figée pour la baseline "p2")
+# ---------------------------------------------------------------------------
+# Choix de modélisation pour le débruitage. Ce sont les paramètres qu'on a
+# validés expérimentalement comme baseline qui supprime réellement du bruit
+# (pas juste l'atténuer) sur le dataset 20 k. Les valeurs ci-dessous sont
+# soit figées dans le code (input_repr=log1p, GroupNorm, AdamW, masque sigmoid,
+# loss combo), soit modifiables via la GUI / CLI quand l'expérimentation peut
+# être utile (poids des composantes loss, warmup, weight decay).
+
+# Compression appliquée à la magnitude AVANT le U-Net. log(1+mag) rend la
+# distribution plus gaussienne et concentre le réseau sur les zones perceptives.
+# La cible reste en magnitude linéaire pour conserver la sémantique
+# `sigmoid × noisy_mag` du masque.
+INPUT_REPR = "log1p"
+
+# Poids des composantes de la loss combinée. La loss totale est :
+#   L = w_mse · MSE(pred_mag, clean_mag)
+#     + w_l1c · L1(pred_mag^0.3, clean_mag^0.3)
+#     + w_mr  · MR-STFT(pred_wav, clean_wav)
+# Une composante à poids 0 est skippée (économie de compute). Modifiable
+# depuis la GUI (panneau "Avancé").
+LOSS_WEIGHTS = {
+    "mse":     0.0,
+    "l1_comp": 1.0,
+    "mr_stft": 1.0,
+}
+
+# Tailles de FFT pour la MR-STFT loss (les hop_length sont déduits = n_fft // 4).
+MR_STFT_FFT_SIZES = (256, 512, 1024)
+
+# Nombre de groupes pour la GroupNorm (figée comme normalisation par défaut :
+# indépendante du batch_size, plus stable que BN à petit batch).
+NORM_GROUPS = 8
+
+# Warmup linéaire du LR sur N epochs (0 = désactivé). Utile pour stabiliser
+# les premières epochs avec AdamW + GroupNorm. Modifiable depuis la GUI.
+LR_WARMUP_EPOCHS = 2

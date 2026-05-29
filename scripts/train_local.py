@@ -91,6 +91,20 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Désactive wandb (utile en local sans clé API).")
     p.add_argument("--force", action="store_true",
                    help="Force l'acquisition du lock même si un autre run semble vivant.")
+
+    # --- Recette p2 : poids des composantes loss + warmup + weight decay ---
+    # Les autres choix de la recette (log1p, GroupNorm, AdamW, masque sigmoid)
+    # sont figés dans le code et ne sont plus exposés en CLI.
+    p.add_argument("--loss-w-mse",    type=float, default=None,
+                   help="Poids MSE dans la loss combinée (0 par défaut).")
+    p.add_argument("--loss-w-l1comp", type=float, default=None,
+                   help="Poids L1(mag^0.3) dans la loss combinée (1.0 par défaut).")
+    p.add_argument("--loss-w-mrstft", type=float, default=None,
+                   help="Poids MR-STFT dans la loss combinée (1.0 par défaut).")
+    p.add_argument("--weight-decay", type=float, default=None,
+                   help="Weight decay AdamW (1e-4 par défaut).")
+    p.add_argument("--lr-warmup-epochs", type=int, default=None,
+                   help="Nb d'epochs de warmup linéaire du LR (2 par défaut, 0 = désactivé).")
     return p
 
 
@@ -117,6 +131,19 @@ def _build_config(args: argparse.Namespace) -> dict:
     if args.base_channels is not None: config["base_channels"] = args.base_channels
     if args.seed is not None:          config["seed"]          = args.seed
     if args.no_wandb:                  config["use_wandb"]     = False
+
+    # --- Overrides recette p2 (loss weights + warmup + weight_decay) ---
+    # Fusionne les --loss-w-* dans le dict loss_weights (override partiel).
+    weight_overrides = {}
+    if args.loss_w_mse    is not None: weight_overrides["mse"]     = args.loss_w_mse
+    if args.loss_w_l1comp is not None: weight_overrides["l1_comp"] = args.loss_w_l1comp
+    if args.loss_w_mrstft is not None: weight_overrides["mr_stft"] = args.loss_w_mrstft
+    if weight_overrides:
+        base_weights = dict(config.get("loss_weights", {}))
+        base_weights.update(weight_overrides)
+        config["loss_weights"] = base_weights
+    if args.weight_decay is not None:     config["weight_decay"]     = args.weight_decay
+    if args.lr_warmup_epochs is not None: config["lr_warmup_epochs"] = args.lr_warmup_epochs
 
     return config
 
