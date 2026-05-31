@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Test — API débruitage voix</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+    h1 { font-size: 1.3rem; }
+    .card { border: 1px solid #e2e2e2; border-radius: 10px; padding: 20px; margin-top: 16px; }
+    label { font-weight: 600; display: block; margin-bottom: 8px; }
+    input[type=file] { margin-bottom: 12px; }
+    button { background: #2563eb; color: #fff; border: 0; padding: 10px 18px; border-radius: 8px; font-size: 1rem; cursor: pointer; }
+    button:disabled { background: #94a3b8; cursor: default; }
+    .row { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 16px; }
+    .col { flex: 1; min-width: 240px; }
+    audio { width: 100%; margin-top: 8px; }
+    #status { margin-top: 14px; font-size: .9rem; }
+    .err { color: #dc2626; }
+    .ok { color: #16a34a; }
+    input[type=text] { width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <h1>🎙️ Test API débruitage</h1>
+
+  <div class="card">
+    <label for="api">URL de l'API</label>
+    <input type="text" id="api" value="http://127.0.0.1:8000">
+
+    <label for="file" style="margin-top:16px">Fichier audio (WAV / FLAC / MP3 / OGG)</label>
+    <input type="file" id="file" accept="audio/*">
+
+    <div>
+      <button id="send" disabled>Débruiter</button>
+    </div>
+
+    <div id="status"></div>
+
+    <div class="row">
+      <div class="col">
+        <strong>Entrée (bruité)</strong>
+        <audio id="inAudio" controls></audio>
+      </div>
+      <div class="col">
+        <strong>Sortie (débruité)</strong>
+        <audio id="outAudio" controls></audio>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const fileInput = document.getElementById('file');
+    const sendBtn   = document.getElementById('send');
+    const statusEl  = document.getElementById('status');
+    const inAudio   = document.getElementById('inAudio');
+    const outAudio  = document.getElementById('outAudio');
+    const apiInput  = document.getElementById('api');
+
+    fileInput.addEventListener('change', () => {
+      sendBtn.disabled = !fileInput.files.length;
+      if (fileInput.files.length) {
+        inAudio.src = URL.createObjectURL(fileInput.files[0]);
+      }
+    });
+
+    sendBtn.addEventListener('click', async () => {
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      sendBtn.disabled = true;
+      statusEl.textContent = '⏳ Traitement en cours…';
+      statusEl.className = '';
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const t0 = performance.now();
+      try {
+        const res = await fetch(apiInput.value.replace(/\/$/, '') + '/denoise', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: 'Erreur ' + res.status }));
+          throw new Error(err.detail ?? ('Erreur ' + res.status));
+        }
+
+        const blob = await res.blob();
+        outAudio.src = URL.createObjectURL(blob);
+        const ms = Math.round(performance.now() - t0);
+        statusEl.textContent = `✅ OK en ${ms} ms (${(blob.size / 1024).toFixed(0)} Ko)`;
+        statusEl.className = 'ok';
+      } catch (e) {
+        statusEl.textContent = '❌ ' + e.message;
+        statusEl.className = 'err';
+      } finally {
+        sendBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
