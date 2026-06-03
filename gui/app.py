@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QProcess, QProcessEnvironment
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -26,6 +28,10 @@ from .queue_widget import QueueWidget
 from .runner import TrainingRunner
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+BUILD_CACHE_SCRIPT = REPO_ROOT / "scripts" / "build_wav_cache.py"
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -33,6 +39,7 @@ class MainWindow(QMainWindow):
         self.resize(1500, 900)
 
         self.runner = TrainingRunner(self)
+        self._cache_proc: QProcess | None = None   # process de build du cache
 
         # --- Colonne gauche : formulaire ---
         self.form = ParamForm()
@@ -40,6 +47,23 @@ class MainWindow(QMainWindow):
         form_scroll.setWidget(self.form)
         form_scroll.setWidgetResizable(True)
         form_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        # --- Préparation des données : construction du cache waveforms ---
+        cache_box = QGroupBox("Cache des données (waveforms)")
+        cache_layout = QVBoxLayout(cache_box)
+        self.btn_build_cache = QPushButton("🗄 Construire / mettre à jour le cache (train + val)")
+        self.btn_build_cache.setStyleSheet("padding: 6px;")
+        self.btn_build_cache.clicked.connect(self._on_build_cache_clicked)
+        self.chk_force_cache = QCheckBox("Forcer la reconstruction (après avoir agrandi le dataset)")
+        cache_hint = QLabel(
+            "À lancer une fois (et après chaque agrandissement du dataset). "
+            "Requis quand l'option « Cache waveforms » est cochée dans le formulaire."
+        )
+        cache_hint.setWordWrap(True)
+        cache_hint.setStyleSheet("color: #888; font-size: 10px; font-style: italic;")
+        cache_layout.addWidget(self.btn_build_cache)
+        cache_layout.addWidget(self.chk_force_cache)
+        cache_layout.addWidget(cache_hint)
 
         self.btn_enqueue = QPushButton("➕ Ajouter à la queue")
         self.btn_enqueue.setStyleSheet("padding: 8px; font-weight: bold;")
@@ -49,6 +73,7 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(8, 8, 8, 8)
         left_layout.addWidget(form_scroll, 1)
+        left_layout.addWidget(cache_box)
         left_layout.addWidget(self.btn_enqueue)
 
         # --- Colonne centre : queue + contrôles ---
@@ -147,6 +172,57 @@ class MainWindow(QMainWindow):
         if self.runner.state == "idle":
             self.runner.start_next_if_idle()
 
+    def _on_build_cache_clicked(self) -> None:
+        if self.runner.is_running():
+            QMessageBox.warning(
+                self, "Cache",
+                "Un entraînement est en cours. Attends sa fin avant de (re)construire le cache.",
+            )
+            return
+        if self._cache_proc is not None:
+            return  # build déjà en cours
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.setWorkingDirectory(str(REPO_ROOT))
+        # systemEnvironment() pour hériter USERPROFILE/PATH (cf. runner) + utf-8
+        # pour ne pas planter l'affichage sur console Windows cp1252.
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONUNBUFFERED", "1")
+        env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("PYTHONUTF8", "1")
+        proc.setProcessEnvironment(env)
+        proc.readyReadStandardOutput.connect(self._on_cache_output)
+        proc.finished.connect(self._on_cache_finished)
+
+        args = [str(BUILD_CACHE_SCRIPT), "--splits", "train", "val"]
+        if self.chk_force_cache.isChecked():
+            args.append("--force")
+
+        self.log_view.clear()
+        self.log_view.append(f"[gui] $ {sys.executable} {' '.join(args)}")
+        self.btn_build_cache.setEnabled(False)
+        self.btn_enqueue.setEnabled(False)
+        self.lbl_state.setText("État : construction du cache…")
+        self._cache_proc = proc
+        proc.start(sys.executable, args)
+
+    def _on_cache_output(self) -> None:
+        if self._cache_proc is None:
+            return
+        raw = bytes(self._cache_proc.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in raw.splitlines():
+            self.log_view.append(line)
+
+    def _on_cache_finished(self, exit_code: int, _status) -> None:
+        self.log_view.append(f"[gui] construction du cache terminée (exit={exit_code}).")
+        self._cache_proc = None
+        self.btn_build_cache.setEnabled(True)
+        self.btn_enqueue.setEnabled(True)
+        self.lbl_state.setText(f"État : {self.runner.state}")
+        if exit_code != 0:
+            QMessageBox.warning(self, "Cache", "La construction du cache a échoué (voir les logs).")
+
     def _on_stop_clicked(self) -> None:
         self.runner.request_stop_current()
 
@@ -177,6 +253,10 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(state == "running")
         self.btn_force_kill.setEnabled(state == "stopping")
         self.btn_resume.setEnabled(state in ("paused", "idle"))
+        # Pas de build de cache pendant qu'un entraînement tourne.
+        self.btn_build_cache.setEnabled(
+            state in ("idle", "paused") and self._cache_proc is None
+        )
         self._refresh_status_bar()
 
     def _on_run_started(self, run_id: str) -> None:
@@ -207,6 +287,9 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------------- close
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        if self._cache_proc is not None and self._cache_proc.state() != QProcess.NotRunning:
+            self._cache_proc.kill()
+            self._cache_proc.waitForFinished(2000)
         if self.runner.is_running():
             reply = QMessageBox.question(
                 self, "Fermer",

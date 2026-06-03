@@ -33,6 +33,7 @@ from torch.utils.data import DataLoader, Subset
 
 from . import config as cfg
 from . import checkpoint as ckpt_io
+from . import audio as A
 from . import stop_signal
 from .dataset import PairedAudioDataset
 from .lock import TrainingLock, LockStolenError
@@ -85,6 +86,23 @@ def _pick_device() -> torch.device:
     return torch.device("cpu")
 
 
+def _configure_backends(device: torch.device) -> None:
+    """Active les optimisations backend CUDA (sans effet hors CUDA).
+
+    - TF32 + matmul 'high' : matmuls/convs fp32 accélérées sur Tensor Cores (gratuit).
+    - cudnn.benchmark : laissé à FALSE. Mesuré : sur la RTX 5070 12 Go il gonfle la
+      VRAM de ~1,4 Go (workspaces d'autotune) et fait déborder en mémoire partagée
+      (lent). Le gain d'autotune est marginal à taille d'entrée fixe. Sur un GPU
+      large (ex: 5090 32 Go sur RunPod) on peut le réactiver pour un petit bonus.
+    """
+    if device.type != "cuda":
+        return
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
+
+
 def _resolve_config(user_config: dict) -> dict:
     """Complète `user_config` avec les valeurs par défaut de `src.config`."""
     defaults = {
@@ -119,6 +137,11 @@ def _resolve_config(user_config: dict) -> dict:
         "mr_stft_fft_sizes":   list(cfg.MR_STFT_FFT_SIZES),
         "norm_groups":         cfg.NORM_GROUPS,
         "lr_warmup_epochs":    cfg.LR_WARMUP_EPOCHS,
+        # --- Performance / précision (CUDA, auto-désactivés sinon) ---
+        "amp":                 cfg.AMP,
+        "compile":             cfg.COMPILE,
+        "use_wav_cache":       cfg.USE_WAV_CACHE,
+        "cache_dir":           cfg.CACHE_DIR,
     }
     return {**defaults, **dict(user_config)}
 
@@ -137,14 +160,20 @@ def _build_optimizer(model: torch.nn.Module, config: dict) -> torch.optim.Optimi
 def _build_loader(noisy_dir: str, clean_dir: str, *, batch_size: int,
                   num_workers: int, shuffle: bool, crop_mode: str,
                   max_samples: int | None,
-                  return_waveform: bool = False) -> DataLoader:
-    ds: torch.utils.data.Dataset = PairedAudioDataset(
-        noisy_dir=noisy_dir,
-        clean_dir=clean_dir,
-        crop_mode=crop_mode,
-        return_spectrogram=True,
-        return_waveform=return_waveform,
-    )
+                  use_wav_cache: bool = False,
+                  cache_dir: str | None = None,
+                  cache_split: str | None = None) -> DataLoader:
+    # Le dataset renvoie toujours des waveforms (waveform_only / cache) ; la STFT
+    # est calculée sur GPU dans le forward (cf. `_build_forward_fn`).
+    if use_wav_cache:
+        ds: torch.utils.data.Dataset = PairedAudioDataset(
+            cache_dir=cache_dir, cache_split=cache_split, crop_mode=crop_mode,
+        )
+    else:
+        ds = PairedAudioDataset(
+            noisy_dir=noisy_dir, clean_dir=clean_dir,
+            crop_mode=crop_mode, waveform_only=True,
+        )
     if max_samples is not None and max_samples < len(ds):
         # Subset déterministe (sans random ici : on prend les N premiers triés)
         ds = Subset(ds, list(range(max_samples)))
@@ -156,6 +185,10 @@ def _build_loader(noisy_dir: str, clean_dir: str, *, batch_size: int,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         drop_last=shuffle,   # entraînement : on évite un dernier batch nain
+        # Workers gardés vivants entre epochs + préchargement : évite de
+        # reconstruire le pool à chaque epoch (gros gain en mode ajustement).
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=(4 if num_workers > 0 else None),
     )
 
 
@@ -173,7 +206,14 @@ def _build_forward_fn(model, config: dict, *, needs_waveform: bool):
 
     L'entrée du réseau est toujours `log1p(noisy_mag)` (compression p2 figée).
     Le masque s'applique à la magnitude linéaire originale.
+
+    Les batches fournissent des **waveforms** (noisy_wav / clean_wav) : la STFT
+    est calculée ici sur le device (GPU) via `audio.stft_torch`, en fp32. Seul
+    le forward du modèle tourne sous autocast bf16 (si `config['amp']`) ; l'ISTFT
+    et la loss MR-STFT restent en fp32 (FFT non fiable en bf16).
     """
+    amp = bool(config.get("amp", False))
+
     def _istft(mag: torch.Tensor, phase: torch.Tensor, length: int) -> torch.Tensor:
         """ISTFT différentiable : combine magnitude prédite + phase noisy."""
         # (B, 1, F, T) → (B, F, T)
@@ -187,17 +227,28 @@ def _build_forward_fn(model, config: dict, *, needs_waveform: bool):
                            window=window, length=length, return_complex=False)
 
     def forward_fn(batch, device):
-        noisy_mag   = batch["noisy_mag"].to(device, non_blocking=True)
-        clean_mag   = batch["clean_mag"].to(device, non_blocking=True)
-        noisy_phase = batch["noisy_phase"].to(device, non_blocking=True)
+        noisy_wav = batch["noisy_wav"].to(device, non_blocking=True)
+        clean_wav = batch["clean_wav"].to(device, non_blocking=True)
+
+        # STFT sur GPU, en fp32 (source de vérité unique, hors autocast).
+        # (B, samples) -> (B, F, T) -> (B, 1, F, T)
+        noisy_mag, noisy_phase = A.stft_torch(noisy_wav)
+        clean_mag, _           = A.stft_torch(clean_wav)
+        noisy_mag = noisy_mag.unsqueeze(1)
+        clean_mag = clean_mag.unsqueeze(1)
 
         # Compression log1p : rend la distribution plus gaussienne en entrée
         # du réseau. La cible reste linéaire pour conserver la sémantique
         # du masque sigmoid × noisy_mag.
         model_input = torch.log1p(noisy_mag)
 
-        # Le masque s'applique à la magnitude originale (non compressée).
-        pred_mag = model(model_input, noisy_mag)
+        # Seul le forward modèle tourne en bf16 (Tensor Cores). Le masque
+        # s'applique à la magnitude originale (non compressée).
+        use_amp = amp and device.type == "cuda"
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            pred_mag = model(model_input, noisy_mag)
+        pred_mag = pred_mag.float()   # repasse en fp32 pour ISTFT + loss
+
         pred_wav = None
         if needs_waveform:
             pred_wav = _istft(pred_mag, noisy_phase, length=cfg.CLIP_SAMPLES)
@@ -208,14 +259,6 @@ def _build_forward_fn(model, config: dict, *, needs_waveform: bool):
             "noisy_mag": noisy_mag,
         }
         if pred_wav is not None:
-            # `clean_wav` / `noisy_wav` ne sont fournis par le dataset que si
-            # `return_waveform=True` côté DataLoader.
-            clean_wav = batch.get("clean_wav")
-            noisy_wav = batch.get("noisy_wav")
-            if clean_wav is not None:
-                clean_wav = clean_wav.to(device, non_blocking=True)
-            if noisy_wav is not None:
-                noisy_wav = noisy_wav.to(device, non_blocking=True)
             out["pred_wav"]  = pred_wav
             out["clean_wav"] = clean_wav
             out["noisy_wav"] = noisy_wav
@@ -477,22 +520,27 @@ def _train_locked(
 
     device = _pick_device()
     print(f"[train] device={device} | run_id={run_id}")
+    _configure_backends(device)
 
     # --- Data ---
-    # On a besoin des waveforms (clean_wav) si la loss en a besoin (MR-STFT)
-    # — l'ISTFT côté prédiction est faite au forward.
-    need_wav = loss_requires_waveform(config)
+    # Les loaders renvoient toujours des waveforms ; la STFT (et l'ISTFT côté
+    # prédiction pour MR-STFT) est faite sur GPU dans le forward. Le cache
+    # memmap supprime le coût librosa.load/STFT côté CPU.
+    use_cache = bool(config.get("use_wav_cache", False))
+    cache_dir = config.get("cache_dir")
+    if use_cache:
+        print(f"[train] cache waveforms : {cache_dir}")
     train_loader = _build_loader(
         config["train_noisy"], config["train_clean"],
         batch_size=config["batch_size"], num_workers=config["num_workers"],
         shuffle=True, crop_mode="random", max_samples=max_train_samples,
-        return_waveform=need_wav,
+        use_wav_cache=use_cache, cache_dir=cache_dir, cache_split="train",
     )
     val_loader = _build_loader(
         config["val_noisy"], config["val_clean"],
         batch_size=config["batch_size"], num_workers=config["num_workers"],
         shuffle=False, crop_mode="center", max_samples=max_val_samples,
-        return_waveform=need_wav,
+        use_wav_cache=use_cache, cache_dir=cache_dir, cache_split="val",
     )
     print(f"[train] batches : train={len(train_loader)}  val={len(val_loader)}")
 
@@ -501,6 +549,20 @@ def _train_locked(
         base_channels=config["base_channels"],
         norm_groups=config.get("norm_groups", 8),
     ).to(device)
+    # torch.compile (CUDA only) : fusionne les kernels. Construit AVANT
+    # l'optimizer (qui partage les mêmes paramètres). Le state_dict est géré par
+    # src.checkpoint qui déballe `_orig_mod` -> compat checkpoints compiled/non.
+    if config.get("compile", False) and device.type == "cuda":
+        try:
+            # La compilation est lazy (au 1er forward). suppress_errors=True fait
+            # retomber dynamo en eager si le backend échoue (ex: Triton absent
+            # sous Windows) au lieu de planter l'entraînement.
+            import torch._dynamo as _dynamo
+            _dynamo.config.suppress_errors = True
+            model = torch.compile(model)
+            print("[train] torch.compile activé (fallback eager si backend indisponible).")
+        except Exception as e:
+            print(f"[train] torch.compile indisponible, ignoré ({e}).")
     optimizer = _build_optimizer(model, config)
     # Scheduler hybride : on ne réduit le LR que si val_loss ET val_si_sdri
     # plateauent toutes les deux (cf. src.scheduler). Optionnellement enveloppé

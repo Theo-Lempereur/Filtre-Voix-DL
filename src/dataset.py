@@ -7,6 +7,7 @@ la valeur de `return_spectrogram`.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Iterable
@@ -91,7 +92,10 @@ class PairedAudioDataset(Dataset):
                  return_spectrogram: bool = True,
                  return_waveform: bool = False,
                  pair_by: str = "auto",
-                 files: Iterable[str] | None = None):
+                 files: Iterable[str] | None = None,
+                 cache_dir: str | None = None,
+                 cache_split: str | None = None,
+                 waveform_only: bool = False):
         self.noisy_dir = noisy_dir
         self.clean_dir = clean_dir
         self.sample_rate = sample_rate
@@ -99,6 +103,47 @@ class PairedAudioDataset(Dataset):
         self.crop_mode = crop_mode
         self.return_spectrogram = return_spectrogram
         self.return_waveform = return_waveform
+        # Mode waveform-only : __getitem__ ne renvoie que les waveforms
+        # (noisy_wav / clean_wav) ; la STFT est faite plus tard sur GPU. C'est le
+        # chemin du pipeline d'entraînement optimisé. Le cache l'implique.
+        self.waveform_only = bool(waveform_only or cache_dir is not None)
+        self._use_cache = False
+        # Les memmaps sont ouverts PARESSEUSEMENT dans __getitem__ (donc dans
+        # chaque worker). On ne garde que les chemins en attribut : un objet
+        # np.memmap ne se pickle pas vers les workers (spawn Windows -> crash).
+        self._cache_noisy_path: str | None = None
+        self._cache_clean_path: str | None = None
+        self._cache_noisy = None
+        self._cache_clean = None
+
+        # --- Chemin cache memmap (float16) : pas de listing de dossier ni de
+        # décodage WAV à chaque accès — on slice un .npy mmap. ---
+        if cache_dir is not None:
+            if cache_split is None:
+                raise ValueError("cache_split est requis quand cache_dir est fourni.")
+            cdir = Path(cache_dir)
+            names_path = cdir / f"{cache_split}_names.json"
+            noisy_npy  = cdir / f"{cache_split}_noisy.npy"
+            clean_npy  = cdir / f"{cache_split}_clean.npy"
+            if not (names_path.exists() and noisy_npy.exists() and clean_npy.exists()):
+                raise FileNotFoundError(
+                    f"Cache introuvable pour le split '{cache_split}' dans {cdir}. "
+                    "Lance d'abord `python scripts/build_wav_cache.py`."
+                )
+            names = json.loads(names_path.read_text(encoding="utf-8"))
+            # Lecture du header (shape) sans conserver le memmap ouvert.
+            n_noisy = int(np.load(noisy_npy, mmap_mode="r").shape[0])
+            n_clean = int(np.load(clean_npy, mmap_mode="r").shape[0])
+            if not (len(names) == n_noisy == n_clean):
+                raise ValueError(
+                    f"Cache '{cache_split}' incohérent : {len(names)} noms vs "
+                    f"{n_noisy}/{n_clean} lignes."
+                )
+            self._use_cache = True
+            self._cache_noisy_path = str(noisy_npy)
+            self._cache_clean_path = str(clean_npy)
+            self.pairs = [(n, "", "") for n in names]
+            return
 
         pairs = list_pairs(noisy_dir, clean_dir, pair_by=pair_by)
         if files is not None:
@@ -119,8 +164,17 @@ class PairedAudioDataset(Dataset):
     def __getitem__(self, idx: int):
         name, noisy_path, clean_path = self.pairs[idx]
 
-        noisy = A.load_audio(noisy_path, sr=self.sample_rate)
-        clean = A.load_audio(clean_path, sr=self.sample_rate)
+        if self._use_cache:
+            if self._cache_noisy is None:
+                # Ouverture paresseuse, une fois par worker (cf. __init__).
+                self._cache_noisy = np.load(self._cache_noisy_path, mmap_mode="r")
+                self._cache_clean = np.load(self._cache_clean_path, mmap_mode="r")
+            # Slice memmap float16 -> copie float32 contiguë.
+            noisy = np.ascontiguousarray(self._cache_noisy[idx], dtype=np.float32)
+            clean = np.ascontiguousarray(self._cache_clean[idx], dtype=np.float32)
+        else:
+            noisy = A.load_audio(noisy_path, sr=self.sample_rate)
+            clean = A.load_audio(clean_path, sr=self.sample_rate)
 
         # Pour garder l'alignement bruité/propre, on choisit un offset commun
         # quand on est en mode random.
@@ -138,6 +192,15 @@ class PairedAudioDataset(Dataset):
         else:
             noisy = A.fix_length(noisy, self.clip_samples, mode=self.crop_mode)
             clean = A.fix_length(clean, self.clip_samples, mode=self.crop_mode)
+
+        if self.waveform_only:
+            # Pipeline optimisé : on ne renvoie que les waveforms ; la STFT
+            # (noisy_mag/phase, clean_mag) est calculée sur GPU dans le forward.
+            return {
+                "name": name,
+                "noisy_wav": torch.from_numpy(noisy).float(),
+                "clean_wav": torch.from_numpy(clean).float(),
+            }
 
         if self.return_spectrogram:
             noisy_spec = A.stft(noisy)

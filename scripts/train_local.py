@@ -92,6 +92,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="Force l'acquisition du lock même si un autre run semble vivant.")
 
+    # --- Performance (activées par défaut sur CUDA ; ces flags les désactivent) ---
+    p.add_argument("--no-amp", action="store_true",
+                   help="Désactive la mixed precision bf16 (activée par défaut sur CUDA).")
+    p.add_argument("--compile", action="store_true",
+                   help="Active torch.compile (Linux/RunPod ; nécessite Triton, "
+                        "sinon fallback eager). Désactivé par défaut (Windows = pas de Triton).")
+    p.add_argument("--no-cache", action="store_true",
+                   help="Lit les WAV directement au lieu du cache memmap "
+                        "(cache activé par défaut ; voir scripts/build_wav_cache.py).")
+
     # --- Recette p2 : poids des composantes loss + warmup + weight decay ---
     # Les autres choix de la recette (log1p, GroupNorm, AdamW, masque sigmoid)
     # sont figés dans le code et ne sont plus exposés en CLI.
@@ -131,6 +141,9 @@ def _build_config(args: argparse.Namespace) -> dict:
     if args.base_channels is not None: config["base_channels"] = args.base_channels
     if args.seed is not None:          config["seed"]          = args.seed
     if args.no_wandb:                  config["use_wandb"]     = False
+    if args.no_amp:                    config["amp"]           = False
+    if args.compile:                   config["compile"]       = True
+    if args.no_cache:                  config["use_wav_cache"] = False
 
     # --- Overrides recette p2 (loss weights + warmup + weight_decay) ---
     # Fusionne les --loss-w-* dans le dict loss_weights (override partiel).
@@ -150,6 +163,16 @@ def _build_config(args: argparse.Namespace) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+
+    # 0. Force l'encodage UTF-8 sur stdout/stderr. Sans ça, un lancement CLI
+    # direct sur une console Windows (cp1252) plante à l'affichage des
+    # caractères non-ASCII (ex: ★ dans les résumés d'epoch). La GUI passe déjà
+    # PYTHONIOENCODING=utf-8 ; on couvre ici le cas du lancement manuel.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
 
     # 1. Vérifie l'accès à la racine Drive (échec clair si Drive Desktop manque).
     cfg.ensure_project_root()

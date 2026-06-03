@@ -93,9 +93,9 @@ generation:
   sample_rate: 16000
   duration_sec: 4.0
 
-  num_train_samples: 16000
-  num_val_samples: 2000
-  num_test_samples: 2000
+  num_train_samples: 64000
+  num_val_samples: 8000
+  num_test_samples: 8000
 
   snr_min_db: -5.0
   snr_max_db: 20.0

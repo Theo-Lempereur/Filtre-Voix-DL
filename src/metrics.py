@@ -40,7 +40,7 @@ def magnitude_mse_loss(pred_mag: torch.Tensor, clean_mag: torch.Tensor) -> torch
 
 
 def l1_compressed_loss(pred_mag: torch.Tensor, clean_mag: torch.Tensor,
-                       power: float = 0.3) -> torch.Tensor:
+                       power: float = 0.3, eps: float = 1e-6) -> torch.Tensor:
     """L1 sur magnitude compressée par `mag^power`.
 
     La MSE/L1 sur magnitude linéaire est dominée par les bins haute énergie
@@ -52,9 +52,13 @@ def l1_compressed_loss(pred_mag: torch.Tensor, clean_mag: torch.Tensor,
     pred_mag, clean_mag : (B, 1, F, T), valeurs >= 0.
     Sortie : scalaire torch.
     """
-    # clamp pour éviter NaN sur dérivée de x^p en x=0 (p<1)
-    pred_c  = torch.clamp(pred_mag,  min=0.0).pow(power)
-    clean_c = torch.clamp(clean_mag, min=0.0).pow(power)
+    # La dérivée de x^p (p<1) tend vers l'infini en x=0. Un simple clamp(min=0)
+    # ne suffit PAS : il laisse passer x=0 exact (cas réel quand un bin de
+    # magnitude est nul — ex. frame de silence, accentué par le cache float16),
+    # et le backward produit alors un gradient inf -> NaN. On ajoute donc un
+    # plancher eps à la base pour garantir une dérivée finie partout.
+    pred_c  = (torch.clamp(pred_mag,  min=0.0) + eps).pow(power)
+    clean_c = (torch.clamp(clean_mag, min=0.0) + eps).pow(power)
     return F.l1_loss(pred_c, clean_c)
 
 

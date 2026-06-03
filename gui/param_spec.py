@@ -77,11 +77,13 @@ PARAM_SPECS: list[ParamSpec] = [
         cli_flag="--batch-size",
         label="Batch size",
         kind="int",
-        default=8,
+        default=24,
         minimum=1,
         maximum=1024,
         step=1,
-        help="Échantillons par batch. 8 tient en VRAM sur T4 avec base_channels=32.",
+        help="Échantillons par batch. Mesuré sur RTX 5070 12 Go (bf16, base=32) : "
+             "24 ≈ 10 Go (OK), 32 déborde (lent). Avec base=48 : viser 16. "
+             "Plus de VRAM (ex: 5090) -> monter.",
     ),
     ParamSpec(
         name="lr",
@@ -100,11 +102,11 @@ PARAM_SPECS: list[ParamSpec] = [
         cli_flag="--num-workers",
         label="Num workers",
         kind="int",
-        default=2,
+        default=8,
         minimum=0,
         maximum=32,
         step=1,
-        help="Workers DataLoader. 2 à 4 sur Colab (RAM limitée), plus en local.",
+        help="Workers DataLoader. 8 en local (Ryzen 8c/16t) ; 2 à 4 sur Colab (RAM limitée).",
     ),
     ParamSpec(
         name="base_channels",
@@ -115,7 +117,8 @@ PARAM_SPECS: list[ParamSpec] = [
         minimum=4,
         maximum=256,
         step=4,
-        help="Largeur initiale du U-Net. Double = ~4x la mémoire et les params (32 ≈ 7,85M).",
+        help="Largeur initiale du U-Net. Double = ~4x la mémoire et les params "
+             "(32 ≈ 7,85M, 48 ≈ 17M, 64 ≈ 31M). Marge confortable jusqu'à 48-64 en bf16.",
     ),
     ParamSpec(
         name="seed",
@@ -131,26 +134,28 @@ PARAM_SPECS: list[ParamSpec] = [
     ParamSpec(
         name="max_train_samples",
         cli_flag="--max-train-samples",
-        label="Max train samples",
+        label="Taille données train",
         kind="int",
-        default=256,
+        default=2000,
         minimum=1,
         maximum=10**7,
-        step=1,
-        help="Smoke test : limite le nombre d'échantillons d'entraînement.",
-        advanced=True,
+        step=500,
+        help="Décoché = tout le dataset généré. Coché = limite le nombre "
+             "d'échantillons d'entraînement (réduire pour itérer vite ; "
+             "augmenter / décocher après avoir agrandi le dataset ×4).",
         optional=True,
     ),
     ParamSpec(
         name="max_val_samples",
         cli_flag="--max-val-samples",
-        label="Max val samples",
+        label="Taille données val",
         kind="int",
-        default=64,
+        default=500,
         minimum=1,
         maximum=10**7,
-        step=1,
-        help="Smoke test : limite le nombre d'échantillons de validation.",
+        step=100,
+        help="Décoché = toute la validation. Coché = limite le nombre "
+             "d'échantillons de validation.",
         advanced=True,
         optional=True,
     ),
@@ -240,6 +245,40 @@ PARAM_SPECS: list[ParamSpec] = [
         step=1,
         help="Nombre d'epochs de warmup linéaire du LR. 2 par défaut, 0 = désactivé.",
         advanced=True,
+    ),
+
+    # ----------------------------------------------------- Performance (CUDA)
+    ParamSpec(
+        name="amp",
+        cli_flag="--no-amp",
+        label="Mixed precision (bf16)",
+        kind="bool",
+        default=True,
+        help="Autocast bf16 : ~1.5-2x plus rapide et ~2x moins de VRAM sur GPU "
+             "récent. Qualité quasi identique. Décocher pour forcer le fp32.",
+        advanced=True,
+        inverted=True,
+    ),
+    ParamSpec(
+        name="compile",
+        cli_flag="--compile",
+        label="torch.compile",
+        kind="bool",
+        default=False,
+        help="Fusionne les kernels (gain réel sur Linux/RunPod, nécessite Triton ; "
+             "indisponible sous Windows -> reste en eager). Coché = on tente la compilation.",
+        advanced=True,
+    ),
+    ParamSpec(
+        name="use_wav_cache",
+        cli_flag="--no-cache",
+        label="Cache waveforms (memmap)",
+        kind="bool",
+        default=True,
+        help="Lit les waveforms depuis le cache float16 (scripts/build_wav_cache.py) "
+             "au lieu de décoder les WAV à chaque epoch. Décocher pour lire les WAV.",
+        advanced=True,
+        inverted=True,
     ),
 ]
 

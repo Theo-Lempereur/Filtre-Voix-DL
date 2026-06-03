@@ -131,14 +131,28 @@ WIN_LENGTH = 512             # longueur effective de la fenêtre
 
 
 # --- Hyperparamètres d'entraînement (valeurs par défaut, surchargeables) ---
-BATCH_SIZE     = 8           # tient sur un GPU T4 avec base_channels=32
-NUM_WORKERS    = 2           # Colab : éviter > 2 (RAM partagée)
+BATCH_SIZE     = 24          # mesuré : ~10 Go sur RTX 5070 12 Go en bf16 (base_channels=32).
+                             # 32 déborde en mémoire partagée (lent). Plus de VRAM -> monter.
+NUM_WORKERS    = 8           # local Ryzen 8c/16t ; sur Colab redescendre à 2 (RAM partagée)
 LR             = 1e-3        # AdamW : 1e-3 est un bon point de départ
 WEIGHT_DECAY   = 1e-4        # AdamW avec weight decay découplé (recommandé)
 NUM_EPOCHS     = 50          # plafond ; early stopping coupera plus tôt si besoin
 BASE_CHANNELS  = 32          # largeur du U-Net (≈7,85M params)
 SEED           = 42          # graine globale (torch, numpy, random)
 GRAD_CLIP_NORM = 1.0         # protège contre les NaN en début d'entraînement
+
+# --- Performance / précision (CUDA) ---
+# Ces options accélèrent l'entraînement sur GPU récent (RTX 30/40/50) sans
+# changement perceptible de qualité. Auto-désactivées hors CUDA.
+AMP            = True         # mixed precision bf16 : ~1.5-2x plus rapide, ~2x moins de VRAM
+# torch.compile : gain réel sur Linux/RunPod, MAIS nécessite Triton (absent sous
+# Windows -> on laisse désactivé par défaut). Activable via --compile : en cas
+# d'absence de Triton, on retombe proprement en eager (cf. src.train).
+COMPILE        = False
+# Cache des waveforms décodées (float16, memmap) pour supprimer le coût
+# librosa.load + STFT côté CPU. La STFT est alors faite sur GPU dans le forward.
+USE_WAV_CACHE  = True
+CACHE_DIR      = os.path.join(REPO_ROOT, "data/processed/cache")
 
 # --- Split par défaut (si on génère un split automatiquement) ---
 SPLIT_RATIOS = (0.8, 0.1, 0.1)   # train / val / test
@@ -148,7 +162,8 @@ CKPT_EVERY_N_EPOCHS = 1      # 1 = on sauvegarde à chaque epoch
 KEEP_LAST_N_CKPT    = 3      # rotation : on garde les N derniers epoch_*.pt
 EARLY_STOP_PATIENCE = 7      # epochs sans amélioration de val avant arrêt
 LR_PATIENCE         = 3      # epochs sans amélioration avant ReduceLROnPlateau
-LR_FACTOR           = 0.1    # facteur de réduction du LR
+LR_FACTOR           = 0.5    # facteur de réduction du LR (0.5 = baisses douces ;
+                             # 0.1 décroissait trop vite -> LR mort vers ~1e-7 et plateau précoce)
 
 # --- Sauvegarde et log INTRA-epoch (sécurité contre coupures Colab) ---
 # Sauvegarde `last.pt` toutes les N secondes pendant une epoch, sans attendre
