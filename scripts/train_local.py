@@ -101,6 +101,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-cache", action="store_true",
                    help="Lit les WAV directement au lieu du cache memmap "
                         "(cache activé par défaut ; voir scripts/build_wav_cache.py).")
+    p.add_argument("--cache-dir", default=None,
+                   help="Dossier du cache memmap (défaut : src.config.CACHE_DIR, "
+                        "surchargeable aussi par la variable FILTRE_VOIX_DL_CACHE). "
+                        "Utile sur RunPod pour pointer le Network Volume.")
 
     # --- Recette p2 : poids des composantes loss + warmup + weight decay ---
     # Les autres choix de la recette (log1p, GroupNorm, AdamW, masque sigmoid)
@@ -144,6 +148,7 @@ def _build_config(args: argparse.Namespace) -> dict:
     if args.no_amp:                    config["amp"]           = False
     if args.compile:                   config["compile"]       = True
     if args.no_cache:                  config["use_wav_cache"] = False
+    if args.cache_dir is not None:     config["cache_dir"]     = args.cache_dir
 
     # --- Overrides recette p2 (loss weights + warmup + weight_decay) ---
     # Fusionne les --loss-w-* dans le dict loss_weights (override partiel).

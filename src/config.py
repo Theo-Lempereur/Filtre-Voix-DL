@@ -152,7 +152,13 @@ COMPILE        = False
 # Cache des waveforms décodées (float16, memmap) pour supprimer le coût
 # librosa.load + STFT côté CPU. La STFT est alors faite sur GPU dans le forward.
 USE_WAV_CACHE  = True
-CACHE_DIR      = os.path.join(REPO_ROOT, "data/processed/cache")
+# Emplacement du cache. Par défaut dans le repo (régénérable, gitignoré). Sur un
+# environnement distant (RunPod) où le repo est cloné à neuf mais où un Network
+# Volume persistant est monté (ex: /workspace), pointer le cache DESSUS via la
+# variable FILTRE_VOIX_DL_CACHE évite de ré-uploader ~18 Go à chaque session.
+CACHE_DIR      = os.environ.get(
+    "FILTRE_VOIX_DL_CACHE", os.path.join(REPO_ROOT, "data/processed/cache")
+)
 
 # --- Split par défaut (si on génère un split automatiquement) ---
 SPLIT_RATIOS = (0.8, 0.1, 0.1)   # train / val / test
