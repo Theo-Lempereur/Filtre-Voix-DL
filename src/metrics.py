@@ -101,6 +101,25 @@ def mr_stft_loss(pred_wav: torch.Tensor, clean_wav: torch.Tensor,
     return total / max(n_scales, 1)
 
 
+def complex_spectral_loss(pred_ri: torch.Tensor, clean_ri: torch.Tensor,
+                          eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
+    """Loss du complex spectral mapping : composantes Re/Im + magnitude.
+
+    pred_ri, clean_ri : (B, 2, F, T) — réel (canal 0) et imaginaire (canal 1)
+    du spectre **compressé** (|S|^c · e^{jθ}).
+
+    Retourne (l_ri, l_mag) :
+      - l_ri  = L1(Re) + L1(Im)            → contraint phase + amplitude conjointement
+      - l_mag = L1(|·|) sur magnitude       → terme stabilisant (Tan & Wang) :
+                empêche le réseau de sacrifier la magnitude pour la phase.
+    """
+    l_ri = F.l1_loss(pred_ri[:, 0], clean_ri[:, 0]) + F.l1_loss(pred_ri[:, 1], clean_ri[:, 1])
+    pred_mag  = torch.sqrt(pred_ri[:, 0] ** 2 + pred_ri[:, 1] ** 2 + eps)
+    clean_mag = torch.sqrt(clean_ri[:, 0] ** 2 + clean_ri[:, 1] ** 2 + eps)
+    l_mag = F.l1_loss(pred_mag, clean_mag)
+    return l_ri, l_mag
+
+
 def si_sdr_wav(pred_wav: torch.Tensor, clean_wav: torch.Tensor,
                eps: float = 1e-8) -> torch.Tensor:
     """SI-SDR (en dB) sur signal temporel — métrique de validation.
@@ -414,6 +433,10 @@ def build_loss(config: dict) -> LossFn:
     Le retour est une closure `(batch) -> scalar` que train.py appelle après
     avoir préparé le dict (forward + éventuelle ISTFT pour MR-STFT).
     """
+    # Mode complex spectral mapping : loss dédiée (Re/Im + magnitude + MR-STFT).
+    if str(config.get("output_mode", "mask")) == "complex":
+        return _build_complex_loss(config)
+
     weights   = dict(config.get("loss_weights", {"l1_comp": 1.0, "mr_stft": 1.0}))
     fft_sizes = tuple(config.get("mr_stft_fft_sizes", (256, 512, 1024)))
 
@@ -443,13 +466,45 @@ def build_loss(config: dict) -> LossFn:
     return _combo
 
 
+def _build_complex_loss(config: dict) -> LossFn:
+    """Loss du complex spectral mapping.
+
+        L = w_ri  · [L1(Re) + L1(Im)]
+          + w_mag · L1(|·|)
+          + w_mr  · MR-STFT(pred_wav, clean_wav)
+
+    Poids lus dans `config["csm_loss_weights"]` (clés "ri", "mag", "mr_stft").
+    Le batch doit contenir `pred_ri`/`clean_ri` (B,2,F,T) et, si w_mr>0,
+    `pred_wav`/`clean_wav`.
+    """
+    w = dict(config.get("csm_loss_weights", {"ri": 1.0, "mag": 1.0, "mr_stft": 1.0}))
+    fft_sizes = tuple(config.get("mr_stft_fft_sizes", (256, 512, 1024)))
+    w_ri  = float(w.get("ri", 1.0))
+    w_mag = float(w.get("mag", 1.0))
+    w_mr  = float(w.get("mr_stft", 1.0))
+
+    def _loss(batch):
+        l_ri, l_mag = complex_spectral_loss(batch["pred_ri"], batch["clean_ri"])
+        total = w_ri * l_ri + w_mag * l_mag
+        if w_mr > 0:
+            if batch.get("pred_wav") is None or batch.get("clean_wav") is None:
+                raise ValueError("csm mr_stft loss requiert pred_wav/clean_wav.")
+            total = total + w_mr * mr_stft_loss(
+                batch["pred_wav"], batch["clean_wav"], fft_sizes=fft_sizes)
+        return total
+    return _loss
+
+
 def loss_requires_waveform(config: dict) -> bool:
     """True si la loss configurée a besoin des waveforms (pred/clean).
 
     train.py utilise ce flag pour décider s'il doit faire l'ISTFT pendant
     le forward — coûteuse, donc évitée si pas nécessaire. Avec la baseline
-    p2 (mr_stft > 0), c'est True.
+    p2 (mr_stft > 0), c'est True. En mode complex, on a toujours besoin des
+    waveforms (MR-STFT + SI-SDR de validation).
     """
+    if str(config.get("output_mode", "mask")) == "complex":
+        return True
     weights = dict(config.get("loss_weights", {}))
     w = weights.get("mr_stft", 0)
     return bool(w and w > 0)

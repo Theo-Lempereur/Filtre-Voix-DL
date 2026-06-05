@@ -81,6 +81,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-workers", type=int, default=None)
     p.add_argument("--base-channels", type=int, default=None)
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--output-mode", choices=["mask", "complex"], default=None,
+                   help="'mask' = recette p2 (masque magnitude). 'complex' = "
+                        "complex spectral mapping (prédit Re/Im, récupère la phase, "
+                        "dépasse le plafond +12 dB).")
+    p.add_argument("--csm-compress", type=float, default=None,
+                   help="Compression puissance des spectres en mode complex (défaut 0.3).")
 
     # Sous-échantillonnage (pour smoke tests).
     p.add_argument("--max-train-samples", type=int, default=None)
@@ -144,6 +150,8 @@ def _build_config(args: argparse.Namespace) -> dict:
     if args.num_workers is not None:   config["num_workers"]   = args.num_workers
     if args.base_channels is not None: config["base_channels"] = args.base_channels
     if args.seed is not None:          config["seed"]          = args.seed
+    if args.output_mode is not None:   config["output_mode"]   = args.output_mode
+    if args.csm_compress is not None:  config["csm_compress"]  = args.csm_compress
     if args.no_wandb:                  config["use_wandb"]     = False
     if args.no_amp:                    config["amp"]           = False
     if args.compile:                   config["compile"]       = True

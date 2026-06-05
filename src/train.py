@@ -137,6 +137,10 @@ def _resolve_config(user_config: dict) -> dict:
         "mr_stft_fft_sizes":   list(cfg.MR_STFT_FFT_SIZES),
         "norm_groups":         cfg.NORM_GROUPS,
         "lr_warmup_epochs":    cfg.LR_WARMUP_EPOCHS,
+        # --- Mode de sortie : "mask" (p2) ou "complex" (complex spectral mapping) ---
+        "output_mode":         cfg.OUTPUT_MODE,
+        "csm_compress":        cfg.CSM_COMPRESS,
+        "csm_loss_weights":    dict(cfg.CSM_LOSS_WEIGHTS),
         # --- Performance / précision (CUDA, auto-désactivés sinon) ---
         "amp":                 cfg.AMP,
         "compile":             cfg.COMPILE,
@@ -213,6 +217,8 @@ def _build_forward_fn(model, config: dict, *, needs_waveform: bool):
     et la loss MR-STFT restent en fp32 (FFT non fiable en bf16).
     """
     amp = bool(config.get("amp", False))
+    output_mode = str(config.get("output_mode", "mask"))
+    c_comp = float(config.get("csm_compress", 0.3))
 
     def _istft(mag: torch.Tensor, phase: torch.Tensor, length: int) -> torch.Tensor:
         """ISTFT différentiable : combine magnitude prédite + phase noisy."""
@@ -264,6 +270,68 @@ def _build_forward_fn(model, config: dict, *, needs_waveform: bool):
             out["noisy_wav"] = noisy_wav
         return out
 
+    # -----------------------------------------------------------------------
+    # Forward "complex spectral mapping" : le réseau prédit Re/Im du spectre
+    # propre (compressés). Récupère la phase -> dépasse le plafond magnitude.
+    # -----------------------------------------------------------------------
+    def _stft_complex(wav: torch.Tensor) -> torch.Tensor:
+        win = torch.hann_window(cfg.WIN_LENGTH, device=wav.device, dtype=wav.dtype)
+        return torch.stft(wav, n_fft=cfg.N_FFT, hop_length=cfg.HOP_LENGTH,
+                          win_length=cfg.WIN_LENGTH, window=win, center=True,
+                          pad_mode="constant", return_complex=True)
+
+    def forward_fn_complex(batch, device):
+        eps = 1e-8
+        noisy_wav = batch["noisy_wav"].to(device, non_blocking=True)
+        clean_wav = batch["clean_wav"].to(device, non_blocking=True)
+
+        # STFT complexe en fp32 (hors autocast).
+        ns = _stft_complex(noisy_wav)       # (B, F, T) complexe
+        cs = _stft_complex(clean_wav)
+        n_mag = ns.abs(); c_mag = cs.abs()
+
+        # Compression puissance : Z = |S|^c · e^{jθ} = S · |S|^(c-1).
+        # (les entrées/cibles n'ont pas de gradient -> pas de souci de dérivée en 0)
+        n_scale = (n_mag + eps).pow(c_comp - 1.0)
+        nz_re = ns.real * n_scale; nz_im = ns.imag * n_scale
+        c_scale = (c_mag + eps).pow(c_comp - 1.0)
+        cz_re = cs.real * c_scale; cz_im = cs.imag * c_scale
+        clean_ri = torch.stack([cz_re, cz_im], dim=1)        # (B, 2, F, T)
+
+        model_input = torch.stack([nz_re, nz_im], dim=1)     # (B, 2, F, T)
+
+        use_amp = amp and device.type == "cuda"
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_amp):
+            pred_ri = model(model_input)                     # (B, 2, F, T)
+        pred_ri = pred_ri.float()
+        pred_re = pred_ri[:, 0]; pred_im = pred_ri[:, 1]
+
+        # Décompression sans atan2 : S = Z · |Z|^((1-c)/c)  (stable, différentiable).
+        pred_cmag = torch.sqrt(pred_re ** 2 + pred_im ** 2 + eps)
+        up = pred_cmag.pow((1.0 - c_comp) / c_comp)
+        s_re = pred_re * up; s_im = pred_im * up
+        pred_spec = torch.complex(s_re, s_im)
+        win = torch.hann_window(cfg.WIN_LENGTH, device=device, dtype=torch.float32)
+        pred_wav = torch.istft(pred_spec, n_fft=cfg.N_FFT, hop_length=cfg.HOP_LENGTH,
+                               win_length=cfg.WIN_LENGTH, window=win, center=True,
+                               length=cfg.CLIP_SAMPLES, return_complex=False)
+
+        # Magnitude linéaire prédite (pour les métriques de validation existantes).
+        pred_mag = pred_cmag.pow(1.0 / c_comp)
+
+        return {
+            "pred_ri":   pred_ri,
+            "clean_ri":  clean_ri,
+            "pred_mag":  pred_mag.unsqueeze(1),
+            "clean_mag": c_mag.unsqueeze(1),
+            "noisy_mag": n_mag.unsqueeze(1),
+            "pred_wav":  pred_wav,
+            "clean_wav": clean_wav,
+            "noisy_wav": noisy_wav,
+        }
+
+    if output_mode == "complex":
+        return forward_fn_complex
     return forward_fn
 
 
@@ -545,10 +613,21 @@ def _train_locked(
     print(f"[train] batches : train={len(train_loader)}  val={len(val_loader)}")
 
     # --- Modèle / optim / scheduler ---
-    model = UNet(
-        base_channels=config["base_channels"],
-        norm_groups=config.get("norm_groups", 8),
-    ).to(device)
+    output_mode = str(config.get("output_mode", "mask"))
+    if output_mode == "complex":
+        # Complex spectral mapping : entrée Re/Im (2 canaux), sortie Re/Im
+        # (2 canaux), pas de masquage (tête linéaire).
+        model = UNet(
+            base_channels=config["base_channels"],
+            norm_groups=config.get("norm_groups", 8),
+            in_channels=2, out_channels=2, head="linear",
+        ).to(device)
+    else:
+        model = UNet(
+            base_channels=config["base_channels"],
+            norm_groups=config.get("norm_groups", 8),
+        ).to(device)
+    print(f"[train] output_mode={output_mode}")
     # torch.compile (CUDA only) : fusionne les kernels. Construit AVANT
     # l'optimizer (qui partage les mêmes paramètres). Le state_dict est géré par
     # src.checkpoint qui déballe `_orig_mod` -> compat checkpoints compiled/non.

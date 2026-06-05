@@ -114,13 +114,27 @@ class UNet(nn.Module):
       norm_groups   : nombre de groupes pour les GroupNorm internes.
     """
 
-    def __init__(self, base_channels: int = 32, norm_groups: int = 8):
+    def __init__(self, base_channels: int = 32, norm_groups: int = 8,
+                 in_channels: int = 1, out_channels: int = 1,
+                 head: str = "mask"):
+        """U-Net configurable.
+
+        Args:
+            in_channels  : nb de canaux d'entrée. 1 pour la recette magnitude
+                           (log1p), 2 pour le complex spectral mapping (Re, Im).
+            out_channels : nb de canaux de sortie. 1 (masque magnitude) ou 2
+                           (Re, Im du spectre propre estimé).
+            head         : "mask"   → sortie = sigmoid(raw) × noisy_ref ∈ [0, noisy]
+                                       (recette p2, magnitude).
+                           "linear" → sortie = raw (Re/Im bruts, complex mapping).
+        """
         super().__init__()
         b = base_channels
         self.norm_groups = norm_groups
+        self.head = head
 
         # --- Encodeur ---
-        self.enc1 = EncoderBlock(1,     b,     norm_groups=norm_groups)
+        self.enc1 = EncoderBlock(in_channels, b, norm_groups=norm_groups)
         self.enc2 = EncoderBlock(b,     b * 2, norm_groups=norm_groups)
         self.enc3 = EncoderBlock(b * 2, b * 4, norm_groups=norm_groups)
         self.enc4 = EncoderBlock(b * 4, b * 8, norm_groups=norm_groups)
@@ -134,24 +148,24 @@ class UNet(nn.Module):
         self.dec2 = DecoderBlock(b * 4,  b * 2, b * 2, norm_groups=norm_groups)
         self.dec1 = DecoderBlock(b * 2,  b,     b,     norm_groups=norm_groups)
 
-        # --- Sortie : 1 canal (masque réel ∈ [0, 1] via sigmoid) ---
-        self.out_conv = nn.Conv2d(b, 1, kernel_size=1)
+        # --- Sortie : out_channels (1 = masque, 2 = Re/Im) ---
+        self.out_conv = nn.Conv2d(b, out_channels, kernel_size=1)
 
     def forward(self, model_input: torch.Tensor,
                 noisy_mag: torch.Tensor | None = None) -> torch.Tensor:
         """Forward du U-Net.
 
         Args:
-            model_input : (B, 1, F, T) — entrée du réseau, éventuellement
-                          compressée (log1p) par train.py. C'est ce que voient
-                          les convolutions.
-            noisy_mag   : (B, 1, F, T) — magnitude **non compressée**, sur
-                          laquelle on applique le masque (`sigmoid × noisy_mag`).
-                          Si None : on utilise `model_input` (cas où la
-                          compression n'est pas activée → équivalent).
+            model_input : (B, C_in, F, T) — entrée du réseau (log1p magnitude en
+                          mode masque ; Re/Im compressés en mode complex).
+            noisy_mag   : (B, 1, F, T) — magnitude **non compressée** sur laquelle
+                          s'applique le masque (mode "mask" uniquement). Ignoré
+                          en mode "linear". Si None en mode "mask" : on retombe
+                          sur `model_input`.
 
         Returns:
-            (B, 1, F, T) — magnitude prédite, bornée à `noisy_mag` par sigmoid.
+            mode "mask"   : (B, 1, F, T) — magnitude prédite ∈ [0, noisy_mag].
+            mode "linear" : (B, C_out, F, T) — sortie brute (Re/Im du spectre).
         """
         if noisy_mag is None:
             noisy_mag = model_input
@@ -169,7 +183,10 @@ class UNet(nn.Module):
         x = self.dec1(x, skip1)
 
         raw = self.out_conv(x)
-        return torch.sigmoid(raw) * noisy_mag
+        if self.head == "mask":
+            return torch.sigmoid(raw) * noisy_mag
+        # head == "linear" : sortie brute (Re/Im), pas de masquage.
+        return raw
 
 
 # ---------------------------------------------------------------------------
