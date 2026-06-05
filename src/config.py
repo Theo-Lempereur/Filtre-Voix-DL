@@ -47,8 +47,11 @@ def _detect_project_root() -> str:
         Path.home() / "Library" / "CloudStorage" / "GoogleDrive-stonslemps@gmail.com" / "My Drive" / "Filtre-Voix-DL",  # macOS récent
     ]
     for c in candidates:
-        if c.exists():
-            return str(c)
+        try:
+            if c.exists():
+                return str(c)
+        except OSError:
+            continue
 
     return _DEFAULT_COLAB_ROOT
 

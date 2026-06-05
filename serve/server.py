@@ -1,10 +1,12 @@
 """API FastAPI pour servir le modèle de débruitage voix.
 
-Charge un checkpoint au démarrage (via la variable d'environnement ``CKPT_PATH``)
-et expose deux endpoints :
+Charge un checkpoint au démarrage si possible, liste les modèles disponibles,
+et expose les endpoints utiles au mini site :
 
+    GET  /          -> mini site de test
     GET  /health   -> état du serveur + infos checkpoint
-    POST /denoise  -> reçoit un fichier audio, renvoie le WAV débruité
+    GET  /models   -> checkpoints disponibles
+    POST /denoise  -> reçoit un fichier audio + modèle, renvoie le WAV débruité
 
 Lancement (depuis la racine du repo, venv activé) :
 
@@ -14,28 +16,33 @@ Lancement (depuis la racine du repo, venv activé) :
     uvicorn serve.server:app --host 127.0.0.1 --port 8000 --workers 1
 
 Variables d'environnement :
-    CKPT_PATH     (requis)  chemin absolu vers le .pt
+    CKPT_PATH     (option)  chemin absolu vers le .pt ou dossier de run par défaut
     DEVICE        (option)  "cuda" / "cpu" ; auto-détecté si absent
     CORS_ORIGINS  (option)  origines autorisées, séparées par virgule (défaut "*")
+    MODEL_DIRS    (option)  dossiers de checkpoints séparés par point-virgule
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import RLock
 
 import torch
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
-from serve.inference import denoise_bytes, load_model
+from serve.inference import denoise_bytes, load_model, resolve_ckpt_path
 
 # Charge le .env à la racine du repo (CKPT_PATH, DEVICE, CORS_ORIGINS).
 # Les variables déjà définies dans l'environnement ont priorité (override=False).
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SERVE_DIR = Path(__file__).resolve().parent
+load_dotenv(REPO_ROOT / ".env")
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -50,6 +57,7 @@ _state: dict = {
     "input_repr": None,
     "ckpt_path": None,
 }
+_state_lock = RLock()
 
 
 # Content-types acceptés (filtre indicatif côté requête ; la vraie validation se
@@ -60,6 +68,12 @@ _ALLOWED_CONTENT_TYPES = {
     "audio/flac", "audio/x-flac",
     "audio/ogg", "audio/x-ogg",
     "application/octet-stream",  # certains navigateurs n'envoient pas de type
+}
+
+_CHECKPOINT_PRIORITY = {
+    "best_si_sdri.pt": 0,
+    "best.pt": 1,
+    "last.pt": 2,
 }
 
 
@@ -76,18 +90,138 @@ def _resolve_cors_origins() -> list[str]:
     return origins or ["*"]
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Charge le modèle au démarrage ; libère au shutdown."""
+def _model_search_roots() -> list[Path]:
+    """Dossiers scannés pour alimenter la liste déroulante du mini site."""
+    roots: list[Path] = []
+
+    raw_dirs = os.environ.get("MODEL_DIRS", "").strip()
+    if raw_dirs:
+        roots.extend(Path(part.strip()) for part in raw_dirs.split(";") if part.strip())
+
+    roots.extend([
+        REPO_ROOT / "checkpoints_runpod",
+        REPO_ROOT / "checkpoints",
+    ])
+
     ckpt_path = os.environ.get("CKPT_PATH", "").strip()
-    if not ckpt_path:
-        raise RuntimeError("Environment variable CKPT_PATH is required.")
+    if ckpt_path:
+        p = Path(ckpt_path)
+        try:
+            roots.append(p if p.is_dir() else p.parent)
+        except OSError:
+            roots.append(p.parent)
 
-    device = _resolve_device()
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            key = str(root.resolve(strict=False)).lower()
+        except OSError:
+            continue
+        if key not in seen:
+            seen.add(key)
+            deduped.append(root)
+    return deduped
+
+
+def _checkpoint_sort_key(path: Path) -> tuple:
+    name = path.name.lower()
+    priority = _CHECKPOINT_PRIORITY.get(name, 3)
+    epoch_rank = 0
+    if name.startswith("epoch_") and name.endswith(".pt"):
+        try:
+            epoch_rank = -int(name.removeprefix("epoch_").removesuffix(".pt"))
+        except ValueError:
+            epoch_rank = 0
+    return (path.parent.name.lower(), priority, epoch_rank, name)
+
+
+def _model_id(path: Path) -> str:
+    resolved = str(path.resolve(strict=False)).replace("\\", "/")
+    return hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:16]
+
+
+def _model_label(path: Path) -> str:
+    try:
+        rel = path.relative_to(REPO_ROOT)
+    except ValueError:
+        rel = path
+    if path.parent.name:
+        return f"{path.parent.name} / {path.name}"
+    return str(rel)
+
+
+def _list_models() -> list[dict]:
+    candidates: dict[str, Path] = {}
+    for root in _model_search_roots():
+        try:
+            if root.is_file() and root.suffix == ".pt":
+                paths = [root]
+            elif root.is_dir():
+                paths = list(root.rglob("*.pt"))
+            else:
+                paths = []
+        except OSError:
+            paths = []
+
+        for path in paths:
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError:
+                continue
+            candidates[str(resolved).lower()] = resolved
+
+    with _state_lock:
+        loaded_path = _state.get("ckpt_path")
+
+    models: list[dict] = []
+    for path in sorted(candidates.values(), key=_checkpoint_sort_key):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        models.append({
+            "id": _model_id(path),
+            "label": _model_label(path),
+            "path": str(path),
+            "size_bytes": stat.st_size,
+            "modified": stat.st_mtime,
+            "is_loaded": _same_path(loaded_path, str(path)) if loaded_path else False,
+        })
+    return models
+
+
+def _same_path(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    try:
+        return Path(left).resolve(strict=False) == Path(right).resolve(strict=False)
+    except OSError:
+        return left == right
+
+
+def _default_model_path() -> str | None:
+    ckpt_path = os.environ.get("CKPT_PATH", "").strip()
+    if ckpt_path:
+        try:
+            return resolve_ckpt_path(ckpt_path)
+        except (FileNotFoundError, OSError):
+            logger.warning("CKPT_PATH introuvable, fallback sur les checkpoints scannés.")
+
+    models = _list_models()
+    return models[0]["path"] if models else None
+
+
+def _resolve_model_selection(model_id: str) -> str:
+    for model_info in _list_models():
+        if model_info["id"] == model_id:
+            return model_info["path"]
+    raise HTTPException(status_code=400, detail="Modèle introuvable.")
+
+
+def _activate_model(ckpt_path: str, device: str) -> None:
     logger.info(f"Loading checkpoint {ckpt_path} on device={device}")
-
     model, input_repr, resolved_path = load_model(ckpt_path, device)
-
     _state.update(
         model=model,
         device=device,
@@ -97,6 +231,48 @@ async def lifespan(app: FastAPI):
     logger.info(
         f"Model ready | device={device} | input_repr={input_repr} | ckpt={resolved_path}"
     )
+
+
+def _get_model_snapshot(model_id: str | None) -> tuple:
+    """Charge le modèle demandé si besoin, puis renvoie une copie stable."""
+    with _state_lock:
+        device = _state.get("device") or _resolve_device()
+
+        if model_id:
+            selected_path = _resolve_model_selection(model_id)
+            if not _same_path(_state.get("ckpt_path"), selected_path):
+                _activate_model(selected_path, device)
+        elif _state["model"] is None:
+            selected_path = _default_model_path()
+            if selected_path is None:
+                raise HTTPException(status_code=503, detail="Aucun modèle .pt trouvé.")
+            _activate_model(selected_path, device)
+
+        if _state["model"] is None:
+            raise HTTPException(status_code=503, detail="Model not loaded.")
+
+        return (
+            _state["model"],
+            _state["device"],
+            _state["input_repr"],
+            _state["ckpt_path"],
+        )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Charge un modèle par défaut si un checkpoint est disponible."""
+    device = _resolve_device()
+    _state["device"] = device
+    ckpt_path = _default_model_path()
+    if ckpt_path:
+        try:
+            with _state_lock:
+                _activate_model(ckpt_path, device)
+        except Exception:  # noqa: BLE001
+            logger.exception("Impossible de charger le modèle initial.")
+    else:
+        logger.warning("Aucun checkpoint .pt trouvé au démarrage.")
 
     yield
 
@@ -118,25 +294,41 @@ app.add_middleware(
 )
 
 
+@app.get("/", include_in_schema=False)
+async def index() -> FileResponse:
+    """Mini site de test."""
+    return FileResponse(SERVE_DIR / "test_client.html")
+
+
 @app.get("/health")
 async def health() -> dict:
     """Sonde de liveness. 503 si le modèle n'est pas chargé."""
-    if _state["model"] is None:
-        raise HTTPException(status_code=503, detail="Model not loaded.")
+    with _state_lock:
+        if _state["model"] is None:
+            raise HTTPException(status_code=503, detail="Model not loaded.")
+        device = _state["device"]
+        ckpt_path = _state["ckpt_path"]
+        input_repr = _state["input_repr"]
     return {
         "status": "ok",
-        "device": _state["device"],
-        "ckpt": _state["ckpt_path"],
-        "input_repr": _state["input_repr"],
+        "device": device,
+        "ckpt": ckpt_path,
+        "input_repr": input_repr,
     }
 
 
-@app.post("/denoise")
-async def denoise_endpoint(file: UploadFile = File(...)) -> StreamingResponse:
-    """Débruite le fichier audio envoyé et renvoie un WAV (16 kHz mono PCM16)."""
-    if _state["model"] is None:
-        raise HTTPException(status_code=503, detail="Model not loaded.")
+@app.get("/models")
+async def models() -> dict:
+    """Liste les checkpoints disponibles pour la liste déroulante."""
+    return {"models": _list_models()}
 
+
+@app.post("/denoise")
+async def denoise_endpoint(
+    file: UploadFile = File(...),
+    model_id: str | None = Form(None),
+) -> StreamingResponse:
+    """Débruite le fichier audio envoyé et renvoie un WAV (16 kHz mono PCM16)."""
     if file.content_type and file.content_type not in _ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
@@ -151,14 +343,17 @@ async def denoise_endpoint(file: UploadFile = File(...)) -> StreamingResponse:
         raise HTTPException(status_code=400, detail="Empty file.")
 
     try:
+        model, device, input_repr, _ckpt_path = _get_model_snapshot(model_id)
         wav_bytes = denoise_bytes(
             audio_bytes,
-            _state["model"],
-            _state["device"],
-            _state["input_repr"],
+            model,
+            device,
+            input_repr,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("Inference error")
         raise HTTPException(status_code=500, detail=f"Inference failed: {exc}")

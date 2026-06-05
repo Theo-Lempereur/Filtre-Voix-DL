@@ -3,102 +3,688 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Test — API débruitage voix</title>
+  <title>Filtre-Voix - Test</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
-    h1 { font-size: 1.3rem; }
-    .card { border: 1px solid #e2e2e2; border-radius: 10px; padding: 20px; margin-top: 16px; }
-    label { font-weight: 600; display: block; margin-bottom: 8px; }
-    input[type=file] { margin-bottom: 12px; }
-    button { background: #2563eb; color: #fff; border: 0; padding: 10px 18px; border-radius: 8px; font-size: 1rem; cursor: pointer; }
-    button:disabled { background: #94a3b8; cursor: default; }
-    .row { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 16px; }
-    .col { flex: 1; min-width: 240px; }
-    audio { width: 100%; margin-top: 8px; }
-    #status { margin-top: 14px; font-size: .9rem; }
-    .err { color: #dc2626; }
-    .ok { color: #16a34a; }
-    input[type=text] { width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; box-sizing: border-box; }
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #171a20;
+      --muted: #667085;
+      --border: #d9dee7;
+      --accent: #1f6feb;
+      --accent-dark: #1557bd;
+      --danger: #c5342f;
+      --ok: #16784c;
+      --disabled: #9aa4b2;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(720px, 100%);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 28px;
+      box-shadow: 0 18px 48px rgba(27, 36, 49, 0.08);
+    }
+
+    h1 {
+      margin: 0 0 24px;
+      font-size: 1.45rem;
+      line-height: 1.2;
+      font-weight: 720;
+      letter-spacing: 0;
+    }
+
+    .field {
+      margin-bottom: 18px;
+    }
+
+    label,
+    .label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      font-weight: 650;
+    }
+
+    select {
+      width: 100%;
+      min-height: 44px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0 12px;
+      background: #fff;
+      color: var(--text);
+      font: inherit;
+    }
+
+    input[type="file"] {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+      clip-path: inset(50%);
+    }
+
+    .file-row,
+    .actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .file-name {
+      min-width: 0;
+      flex: 1;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+      font-size: 0.95rem;
+    }
+
+    .button {
+      min-height: 42px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 0 16px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: var(--accent);
+      color: #fff;
+      font: inherit;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
+    }
+
+    .button:hover:not(:disabled):not(.is-disabled) {
+      background: var(--accent-dark);
+      transform: translateY(-1px);
+    }
+
+    .button.secondary {
+      background: #fff;
+      color: var(--text);
+      border-color: var(--border);
+    }
+
+    .button.secondary:hover:not(:disabled):not(.is-disabled) {
+      background: #f9fafb;
+      border-color: #b9c2d0;
+    }
+
+    .button:disabled,
+    .button.is-disabled {
+      background: var(--disabled);
+      color: #fff;
+      cursor: default;
+      pointer-events: none;
+      transform: none;
+    }
+
+    .actions {
+      margin-top: 22px;
+    }
+
+    .status {
+      min-height: 22px;
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .status.ok {
+      color: var(--ok);
+    }
+
+    .status.error {
+      color: var(--danger);
+    }
+
+    .output {
+      margin-top: 22px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+    }
+
+    .output-list {
+      display: grid;
+      gap: 14px;
+    }
+
+    .output-item {
+      padding: 14px 0 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .output-item:first-child {
+      padding-top: 0;
+      border-top: 0;
+    }
+
+    .output-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.9rem;
+      font-weight: 650;
+    }
+
+    .diff-panel {
+      margin-top: 12px;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .diff-title {
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.86rem;
+      font-weight: 650;
+    }
+
+    .diff-canvas {
+      width: 100%;
+      height: 160px;
+      display: block;
+      border-radius: 6px;
+      background: #111827;
+    }
+
+    .diff-error {
+      margin: 0;
+      color: var(--danger);
+      font-size: 0.86rem;
+    }
+
+    audio {
+      width: 100%;
+      display: block;
+    }
+
+    @media (max-width: 560px) {
+      body {
+        padding: 14px;
+      }
+
+      main {
+        padding: 20px;
+      }
+
+      .button {
+        width: 100%;
+      }
+
+      .file-name {
+        flex-basis: 100%;
+      }
+    }
   </style>
 </head>
 <body>
-  <h1>🎙️ Test API débruitage</h1>
+  <main>
+    <h1>Filtre-Voix</h1>
 
-  <div class="card">
-    <label for="api">URL de l'API</label>
-    <input type="text" id="api" value="http://127.0.0.1:8000">
-
-    <label for="file" style="margin-top:16px">Fichier audio (WAV / FLAC / MP3 / OGG)</label>
-    <input type="file" id="file" accept="audio/*">
-
-    <div>
-      <button id="send" disabled>Débruiter</button>
+    <div class="field">
+      <label for="model">Modèle</label>
+      <select id="model">
+        <option value="">Chargement...</option>
+      </select>
     </div>
 
-    <div id="status"></div>
-
-    <div class="row">
-      <div class="col">
-        <strong>Entrée (bruité)</strong>
-        <audio id="inAudio" controls></audio>
-      </div>
-      <div class="col">
-        <strong>Sortie (débruité)</strong>
-        <audio id="outAudio" controls></audio>
+    <div class="field">
+      <span class="label">Fichier audio</span>
+      <div class="file-row">
+        <label class="button secondary" for="file">Explorer</label>
+        <input id="file" type="file" accept="audio/*">
+        <span id="fileName" class="file-name">Aucun fichier choisi</span>
       </div>
     </div>
-  </div>
+
+    <div class="actions">
+      <button id="run" class="button" type="button" disabled>Lancer</button>
+      <button id="rerun" class="button secondary" type="button" disabled>Repasser</button>
+      <a id="download" class="button is-disabled" href="#" download="voix_debruitee.wav" aria-disabled="true">Télécharger</a>
+    </div>
+
+    <div id="status" class="status"></div>
+
+    <div class="output">
+      <span class="label">Sorties</span>
+      <div id="outputList" class="output-list" aria-live="polite"></div>
+    </div>
+  </main>
 
   <script>
+    const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:8000' : window.location.origin;
+    const modelSelect = document.getElementById('model');
     const fileInput = document.getElementById('file');
-    const sendBtn   = document.getElementById('send');
-    const statusEl  = document.getElementById('status');
-    const inAudio   = document.getElementById('inAudio');
-    const outAudio  = document.getElementById('outAudio');
-    const apiInput  = document.getElementById('api');
+    const fileName = document.getElementById('fileName');
+    const runButton = document.getElementById('run');
+    const rerunButton = document.getElementById('rerun');
+    const downloadButton = document.getElementById('download');
+    const statusEl = document.getElementById('status');
+    const outputList = document.getElementById('outputList');
+
+    let resultUrls = [];
+    let outputRecords = [];
+    let resultBlob = null;
+    let passCount = 0;
+    let audioContext = null;
+    let spectrogramBasis = null;
+
+    const SPECTROGRAM_FFT_SIZE = 256;
+    const SPECTROGRAM_HOP_SIZE = 128;
+    const SPECTROGRAM_BINS = 128;
+    const SPECTROGRAM_WIDTH = 640;
+    const SPECTROGRAM_HEIGHT = 180;
+    const SPECTROGRAM_TARGET_RATE = 16000;
+
+    function setStatus(message, type = '') {
+      statusEl.textContent = message;
+      statusEl.className = `status ${type}`.trim();
+    }
+
+    function setDownloadEnabled(enabled) {
+      if (enabled) {
+        downloadButton.classList.remove('is-disabled');
+        downloadButton.setAttribute('aria-disabled', 'false');
+      } else {
+        downloadButton.classList.add('is-disabled');
+        downloadButton.setAttribute('aria-disabled', 'true');
+        downloadButton.removeAttribute('href');
+      }
+    }
+
+    function resetOutputs() {
+      for (const url of resultUrls) {
+        URL.revokeObjectURL(url);
+      }
+      resultUrls = [];
+      outputRecords = [];
+      resultBlob = null;
+      passCount = 0;
+      outputList.innerHTML = '';
+      setDownloadEnabled(false);
+    }
+
+    async function appendOutput(blob, passNumber) {
+      const url = URL.createObjectURL(blob);
+      resultUrls.push(url);
+
+      const previousRecord = outputRecords[outputRecords.length - 1] ?? null;
+      const record = {
+        blob,
+        url,
+        passNumber,
+        samples: null,
+        sampleRate: null,
+      };
+      outputRecords.push(record);
+
+      const item = document.createElement('section');
+      item.className = 'output-item';
+
+      const head = document.createElement('div');
+      head.className = 'output-head';
+      head.textContent = passNumber > 1 ? `Sortie ${passNumber}` : 'Sortie 1';
+
+      const audio = document.createElement('audio');
+      audio.controls = true;
+      audio.src = url;
+
+      item.append(head, audio);
+      outputList.append(item);
+
+      downloadButton.href = url;
+      downloadButton.download = passNumber > 1
+        ? `voix_debruitee_pass_${passNumber}.wav`
+        : 'voix_debruitee.wav';
+      setDownloadEnabled(true);
+
+      try {
+        const decoded = await decodeAudioBlob(blob);
+        record.samples = decoded.samples;
+        record.sampleRate = decoded.sampleRate;
+
+        if (previousRecord?.samples) {
+          const diffPanel = document.createElement('div');
+          diffPanel.className = 'diff-panel';
+
+          const diffTitle = document.createElement('div');
+          diffTitle.className = 'diff-title';
+          diffTitle.textContent = `Diff sortie ${passNumber - 1} - ${passNumber}`;
+
+          const canvas = document.createElement('canvas');
+          canvas.className = 'diff-canvas';
+          canvas.width = SPECTROGRAM_WIDTH;
+          canvas.height = SPECTROGRAM_HEIGHT;
+
+          diffPanel.append(diffTitle, canvas);
+          item.append(diffPanel);
+          renderDifferenceSpectrogram(previousRecord.samples, record.samples, canvas);
+        }
+      } catch (error) {
+        if (previousRecord) {
+          const diffPanel = document.createElement('div');
+          diffPanel.className = 'diff-panel';
+
+          const message = document.createElement('p');
+          message.className = 'diff-error';
+          message.textContent = `Spectrogramme indisponible : ${error.message}`;
+
+          diffPanel.append(message);
+          item.append(diffPanel);
+        }
+      }
+    }
+
+    async function decodeAudioBlob(blob) {
+      audioContext ??= new (window.AudioContext || window.webkitAudioContext)();
+      const buffer = await blob.arrayBuffer();
+      const decoded = await audioContext.decodeAudioData(buffer);
+      const channel = decoded.getChannelData(0);
+      return resampleForSpectrogram(channel, decoded.sampleRate);
+    }
+
+    function resampleForSpectrogram(samples, sampleRate) {
+      if (sampleRate <= SPECTROGRAM_TARGET_RATE) {
+        return {
+          samples: new Float32Array(samples),
+          sampleRate,
+        };
+      }
+
+      const ratio = sampleRate / SPECTROGRAM_TARGET_RATE;
+      const length = Math.max(1, Math.floor(samples.length / ratio));
+      const resampled = new Float32Array(length);
+
+      for (let i = 0; i < length; i += 1) {
+        const sourceIndex = i * ratio;
+        const left = Math.floor(sourceIndex);
+        const right = Math.min(left + 1, samples.length - 1);
+        const t = sourceIndex - left;
+        resampled[i] = samples[left] * (1 - t) + samples[right] * t;
+      }
+
+      return {
+        samples: resampled,
+        sampleRate: SPECTROGRAM_TARGET_RATE,
+      };
+    }
+
+    function getSpectrogramBasis() {
+      if (spectrogramBasis) {
+        return spectrogramBasis;
+      }
+
+      const windowValues = new Float32Array(SPECTROGRAM_FFT_SIZE);
+      const cos = new Float32Array(SPECTROGRAM_BINS * SPECTROGRAM_FFT_SIZE);
+      const sin = new Float32Array(SPECTROGRAM_BINS * SPECTROGRAM_FFT_SIZE);
+
+      for (let n = 0; n < SPECTROGRAM_FFT_SIZE; n += 1) {
+        windowValues[n] = 0.5 - 0.5 * Math.cos((2 * Math.PI * n) / (SPECTROGRAM_FFT_SIZE - 1));
+      }
+
+      for (let bin = 0; bin < SPECTROGRAM_BINS; bin += 1) {
+        const offset = bin * SPECTROGRAM_FFT_SIZE;
+        for (let n = 0; n < SPECTROGRAM_FFT_SIZE; n += 1) {
+          const angle = (2 * Math.PI * bin * n) / SPECTROGRAM_FFT_SIZE;
+          cos[offset + n] = Math.cos(angle);
+          sin[offset + n] = -Math.sin(angle);
+        }
+      }
+
+      spectrogramBasis = { windowValues, cos, sin };
+      return spectrogramBasis;
+    }
+
+    function renderDifferenceSpectrogram(previousSamples, currentSamples, canvas) {
+      const length = Math.min(previousSamples.length, currentSamples.length);
+      const frameCount = Math.max(
+        1,
+        Math.floor(Math.max(0, length - SPECTROGRAM_FFT_SIZE) / SPECTROGRAM_HOP_SIZE) + 1,
+      );
+      const values = new Float32Array(frameCount * SPECTROGRAM_BINS);
+      const { windowValues, cos, sin } = getSpectrogramBasis();
+      let maxDb = -Infinity;
+
+      for (let frame = 0; frame < frameCount; frame += 1) {
+        const frameStart = frame * SPECTROGRAM_HOP_SIZE;
+        for (let bin = 0; bin < SPECTROGRAM_BINS; bin += 1) {
+          let real = 0;
+          let imag = 0;
+          const basisOffset = bin * SPECTROGRAM_FFT_SIZE;
+
+          for (let n = 0; n < SPECTROGRAM_FFT_SIZE; n += 1) {
+            const sampleIndex = frameStart + n;
+            const diff = sampleIndex < length
+              ? currentSamples[sampleIndex] - previousSamples[sampleIndex]
+              : 0;
+            const sample = diff * windowValues[n];
+            real += sample * cos[basisOffset + n];
+            imag += sample * sin[basisOffset + n];
+          }
+
+          const magnitude = Math.sqrt(real * real + imag * imag);
+          const db = 20 * Math.log10(magnitude + 1e-7);
+          values[frame * SPECTROGRAM_BINS + bin] = db;
+          if (db > maxDb) {
+            maxDb = db;
+          }
+        }
+      }
+
+      const floorDb = Number.isFinite(maxDb) ? maxDb - 60 : -60;
+      const ctx = canvas.getContext('2d');
+      const image = ctx.createImageData(canvas.width, canvas.height);
+
+      for (let x = 0; x < canvas.width; x += 1) {
+        const frame = Math.min(frameCount - 1, Math.floor((x / canvas.width) * frameCount));
+        for (let y = 0; y < canvas.height; y += 1) {
+          const bin = Math.min(
+            SPECTROGRAM_BINS - 1,
+            Math.floor(((canvas.height - 1 - y) / canvas.height) * SPECTROGRAM_BINS),
+          );
+          const db = values[frame * SPECTROGRAM_BINS + bin];
+          const value = clamp((db - floorDb) / 60, 0, 1);
+          const [red, green, blue] = spectrogramColor(value);
+          const pixel = (y * canvas.width + x) * 4;
+          image.data[pixel] = red;
+          image.data[pixel + 1] = green;
+          image.data[pixel + 2] = blue;
+          image.data[pixel + 3] = 255;
+        }
+      }
+
+      ctx.putImageData(image, 0, 0);
+    }
+
+    function spectrogramColor(value) {
+      if (value < 0.5) {
+        const t = value / 0.5;
+        return interpolateColor([16, 24, 39], [30, 111, 184], t);
+      }
+
+      const t = (value - 0.5) / 0.5;
+      return interpolateColor([30, 111, 184], [245, 189, 75], t);
+    }
+
+    function interpolateColor(left, right, t) {
+      return [
+        Math.round(left[0] + (right[0] - left[0]) * t),
+        Math.round(left[1] + (right[1] - left[1]) * t),
+        Math.round(left[2] + (right[2] - left[2]) * t),
+      ];
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function refreshRunState() {
+      runButton.disabled = !modelSelect.value || !fileInput.files.length;
+      rerunButton.disabled = !modelSelect.value || !resultBlob;
+    }
+
+    function setBusy(isBusy) {
+      modelSelect.disabled = isBusy;
+      fileInput.disabled = isBusy;
+      runButton.disabled = isBusy;
+      rerunButton.disabled = isBusy;
+    }
+
+    async function loadModels() {
+      try {
+        const response = await fetch(`${apiBase}/models`);
+        if (!response.ok) {
+          throw new Error(`Erreur ${response.status}`);
+        }
+
+        const data = await response.json();
+        const models = data.models ?? [];
+        modelSelect.innerHTML = '';
+
+        if (!models.length) {
+          modelSelect.innerHTML = '<option value="">Aucun modèle trouvé</option>';
+          setStatus('Aucun checkpoint .pt trouvé.', 'error');
+          refreshRunState();
+          return;
+        }
+
+        for (const model of models) {
+          const option = document.createElement('option');
+          option.value = model.id;
+          option.textContent = model.is_loaded ? `${model.label} (chargé)` : model.label;
+          modelSelect.append(option);
+          if (model.is_loaded) {
+            option.selected = true;
+          }
+        }
+
+        if (!modelSelect.value) {
+          modelSelect.selectedIndex = 0;
+        }
+        setStatus(`${models.length} modèle(s) disponible(s).`);
+      } catch (error) {
+        modelSelect.innerHTML = '<option value="">API indisponible</option>';
+        setStatus(`Impossible de charger les modèles : ${error.message}`, 'error');
+      } finally {
+        refreshRunState();
+      }
+    }
 
     fileInput.addEventListener('change', () => {
-      sendBtn.disabled = !fileInput.files.length;
-      if (fileInput.files.length) {
-        inAudio.src = URL.createObjectURL(fileInput.files[0]);
+      resetOutputs();
+      const file = fileInput.files[0];
+      fileName.textContent = file ? file.name : 'Aucun fichier choisi';
+      setStatus(file ? '' : 'Choisis un fichier audio.');
+      refreshRunState();
+    });
+
+    modelSelect.addEventListener('change', () => {
+      resetOutputs();
+      refreshRunState();
+    });
+
+    downloadButton.addEventListener('click', (event) => {
+      if (downloadButton.getAttribute('aria-disabled') === 'true') {
+        event.preventDefault();
       }
     });
 
-    sendBtn.addEventListener('click', async () => {
-      const file = fileInput.files[0];
-      if (!file) return;
+    async function denoiseAudio(source, sourceName, statusText, nextPassCount, clearPrevious) {
+      if (!source || !modelSelect.value) {
+        refreshRunState();
+        return;
+      }
 
-      sendBtn.disabled = true;
-      statusEl.textContent = '⏳ Traitement en cours…';
-      statusEl.className = '';
+      if (clearPrevious) {
+        resetOutputs();
+      }
+      setBusy(true);
+      setStatus(statusText);
 
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', source, sourceName);
+      formData.append('model_id', modelSelect.value);
 
-      const t0 = performance.now();
+      const startedAt = performance.now();
       try {
-        const res = await fetch(apiInput.value.replace(/\/$/, '') + '/denoise', {
+        const response = await fetch(`${apiBase}/denoise`, {
           method: 'POST',
           body: formData,
         });
 
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ detail: 'Erreur ' + res.status }));
-          throw new Error(err.detail ?? ('Erreur ' + res.status));
+        if (!response.ok) {
+          const errorBody = await response.json().catch(() => ({ detail: `Erreur ${response.status}` }));
+          throw new Error(errorBody.detail ?? `Erreur ${response.status}`);
         }
 
-        const blob = await res.blob();
-        outAudio.src = URL.createObjectURL(blob);
-        const ms = Math.round(performance.now() - t0);
-        statusEl.textContent = `✅ OK en ${ms} ms (${(blob.size / 1024).toFixed(0)} Ko)`;
-        statusEl.className = 'ok';
-      } catch (e) {
-        statusEl.textContent = '❌ ' + e.message;
-        statusEl.className = 'err';
+        const blob = await response.blob();
+        resultBlob = blob;
+        passCount = nextPassCount;
+        await appendOutput(blob, passCount);
+
+        const elapsed = Math.round(performance.now() - startedAt);
+        await loadModels();
+        const passText = passCount > 1 ? `Passe ${passCount} terminée` : 'Terminé';
+        setStatus(`${passText} en ${elapsed} ms.`, 'ok');
+      } catch (error) {
+        setStatus(`Échec : ${error.message}`, 'error');
       } finally {
-        sendBtn.disabled = false;
+        setBusy(false);
+        refreshRunState();
       }
+    }
+
+    runButton.addEventListener('click', async () => {
+      const file = fileInput.files[0];
+      await denoiseAudio(file, file?.name ?? 'audio.wav', 'Traitement en cours...', 1, true);
     });
+
+    rerunButton.addEventListener('click', async () => {
+      if (!resultBlob) {
+        refreshRunState();
+        return;
+      }
+      await denoiseAudio(
+        resultBlob,
+        `voix_debruitee_pass_${passCount || 1}.wav`,
+        'Repassage dans le même modèle...',
+        passCount + 1,
+        false,
+      );
+    });
+
+    setDownloadEnabled(false);
+    loadModels();
   </script>
 </body>
 </html>
