@@ -222,3 +222,34 @@ NORM_GROUPS = 8
 # Warmup linéaire du LR sur N epochs (0 = désactivé). Utile pour stabiliser
 # les premières epochs avec AdamW + GroupNorm. Modifiable depuis la GUI.
 LR_WARMUP_EPOCHS = 2
+
+
+# ---------------------------------------------------------------------------
+# Mode de sortie du modèle : masque magnitude (p2) vs complex spectral mapping
+# ---------------------------------------------------------------------------
+# "mask"    : recette p2 historique. Le réseau prédit un masque réel ∈ [0,1]
+#             appliqué à la magnitude du bruité ; reconstruction avec la phase
+#             du bruité. Plafond de SI-SDR dur (~+12 dB SI-SDRi mesuré) car la
+#             phase n'est jamais corrigée.
+# "complex" : complex spectral mapping. Le réseau prédit directement le réel et
+#             l'imaginaire du spectre propre (2 canaux) → il RÉCUPÈRE la phase,
+#             ce qui permet de dépasser le plafond magnitude. Entrée = Re/Im du
+#             bruité compressés par |·|^c ; sortie = Re/Im propre compressés ;
+#             décompression puis ISTFT pour la waveform.
+OUTPUT_MODE = "mask"
+
+# Compression puissance des spectres complexes (mode "complex" uniquement).
+# S_comp = |S|^c · e^{jθ}. c<1 rééquilibre le budget de gradient vers les bins
+# faible énergie (même esprit que log1p en magnitude). 0.3 est un choix usuel
+# (Tan & Wang, complex spectral mapping).
+CSM_COMPRESS = 0.3
+
+# Poids de la loss en mode "complex" :
+#   L = w_ri  · [L1(Re) + L1(Im)]      (réel/imaginaire compressés)
+#     + w_mag · L1(|·|)                (magnitude compressée — stabilise)
+#     + w_mr  · MR-STFT(pred_wav, clean_wav)
+CSM_LOSS_WEIGHTS = {
+    "ri":      1.0,
+    "mag":     1.0,
+    "mr_stft": 1.0,
+}
