@@ -59,6 +59,13 @@ Elle permet de régler :
 - les augmentations de voix : compression, EQ, téléphone, saturation, codec, etc.
 ```
 
+L'interface utilise `customtkinter`. Si elle ne se lance pas après un `git pull`,
+réinstalle les dépendances :
+
+```bash
+pip install -r requirements.txt
+```
+
 Après sauvegarde, relance la génération du dataset final :
 
 ```bash
