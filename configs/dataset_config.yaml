@@ -112,11 +112,11 @@ generation:
 
   save_noise: false
 
-  apply_clean_augment: false
+  apply_clean_augment: true
   apply_noise_augment: false
 
-  apply_post_noisy_augment: false
-  post_noisy_augment_probability: 0.10
+  apply_post_noisy_augment: true
+  post_noisy_augment_probability: 0.2
 
   allowed_extensions:
     - ".wav"
@@ -126,13 +126,24 @@ generation:
 augmentations:
   enabled: true
 
-  p_gain: 0.35
-  p_eq: 0.25
-  p_compression: 0.20
-  p_saturation: 0.12
-  p_clipping: 0.04
-  p_phone_filter: 0.08
-  p_reverb: 0.12
-  p_codec: 0.06
-  p_dropout: 0.03
-  p_quantization: 0.05
+  p_gain: 0.3
+  p_eq: 0.35
+  p_compression: 0.55
+  p_saturation: 0.18
+  p_clipping: 0.05
+  p_phone_filter: 0.2
+  p_reverb: 0.16
+  p_codec: 0.12
+  p_dropout: 0.04
+  p_quantization: 0.08
+
+  compressor_threshold_min_db: -32.0
+  compressor_threshold_max_db: -14.0
+  compressor_ratio_min: 2.0
+  compressor_ratio_max: 5.0
+
+  saturation_drive_min_db: 2.0
+  saturation_drive_max_db: 10.0
+
+  phone_highpass_min_hz: 250.0
+  phone_lowpass_max_hz: 3800.0

@@ -34,6 +34,42 @@ FFmpeg est recommandé si tu utilises des fichiers `.mp3`, `.m4a`, `.aac`, etc.
 
 ### 2. Modifier la configuration
 
+#### Option visuelle
+
+Une interface locale permet de modifier les paramètres principaux sans éditer le YAML à la main :
+
+```bash
+python scripts/run_full_pipeline.py --gui
+```
+
+Sur Windows :
+
+```bash
+py scripts/run_full_pipeline.py --gui
+```
+
+Elle permet de régler :
+
+```txt
+- les dossiers d'entrée clean / noise
+- le nombre de fichiers utilisés
+- les durées et paramètres de preprocessing
+- le nombre de samples train / val / test
+- la plage de SNR
+- les augmentations de voix : compression, EQ, téléphone, saturation, codec, etc.
+```
+
+Après sauvegarde, relance la génération du dataset final :
+
+```bash
+python scripts/run_full_pipeline.py --skip-clean --skip-noise --reset-generated
+```
+
+Tu peux aussi lancer cette génération directement depuis l'interface avec le bouton
+`Générer dataset final`.
+
+#### Option YAML
+
 Tout se règle ici :
 
 ```txt

@@ -36,6 +36,12 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Ouvre l'interface visuelle de configuration avant lancement.",
+    )
+
+    parser.add_argument(
         "--reset-all",
         action="store_true",
         help="Vide chunks, generated, metadata et logs avant lancement.",
@@ -74,6 +80,13 @@ def main() -> None:
     args = parser.parse_args()
 
     python = sys.executable
+
+    if args.gui:
+        run_step(
+            "Interface configuration dataset",
+            [python, "scripts/config_gui.py"],
+        )
+        return
 
     print("=" * 80)
     print("PIPELINE COMPLET SPEECH ENHANCEMENT")
