@@ -1,3 +1,5 @@
+"""Launch the modern visual dataset configuration editor."""
+
 from pathlib import Path
 import sys
 

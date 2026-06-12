@@ -1,3 +1,16 @@
+"""Audio augmentation primitives used to simulate microphones, codecs, and calls.
+
+The generator uses these effects to make synthetic noisy examples closer to
+real-world capture conditions: phone bandwidth, compression, cheap microphone
+saturation, codec losses, short dropouts, quantization, gain shifts, and light
+reverb.
+
+Every transform accepts mono ``float32`` audio shaped as ``(samples,)`` and
+returns ``float32`` audio with the same length unless explicitly documented
+otherwise. Randomized transforms receive a Python ``random.Random`` instance so
+dataset generation can remain deterministic when configured.
+"""
+
 from dataclasses import dataclass, field
 from pathlib import Path
 import math
@@ -16,12 +29,24 @@ EPS = 1e-12
 
 @dataclass
 class AugmentConfig:
+    """Configuration for probabilistic audio degradations used during generation.
+
+    Attributes:
+        sample_rate: Expected sample rate in Hz.
+        duration_sec: Expected duration of each augmented clip.
+        enabled: Master switch for the augmentation pipeline.
+        p_*: Independent application probability for each effect family.
+        *_min / *_max: Random sampling ranges used by the corresponding effect.
+        codec_choices: FFmpeg codecs allowed for roundtrip simulation.
+        peak_limit: Maximum absolute amplitude after each safety limiting step.
+    """
+
     sample_rate: int = 16000
     duration_sec: float = 3.0
 
     enabled: bool = True
 
-    # Probabilités
+    # Application probabilities
     p_gain: float = 0.35
     p_eq: float = 0.25
     p_compression: float = 0.20
@@ -41,7 +66,7 @@ class AugmentConfig:
     eq_gain_min_db: float = -6.0
     eq_gain_max_db: float = 6.0
 
-    # Téléphone / VoIP
+    # Phone / VoIP band limits
     phone_highpass_min_hz: float = 250.0
     phone_highpass_max_hz: float = 350.0
     phone_lowpass_min_hz: float = 3000.0
@@ -61,7 +86,7 @@ class AugmentConfig:
     clipping_threshold_min: float = 0.55
     clipping_threshold_max: float = 0.95
 
-    # Reverb légère
+    # Lightweight reverb
     reverb_wet_min: float = 0.03
     reverb_wet_max: float = 0.18
     reverb_decay_min_ms: float = 80.0
@@ -86,26 +111,63 @@ class AugmentConfig:
     quantization_bits_min: int = 8
     quantization_bits_max: int = 12
 
-    # Sécurité
+    # Audio safety
     peak_limit: float = 0.98
 
 
 @dataclass
 class AugmentResult:
+    """Augmented audio plus a compact trace of applied effects and parameters.
+
+    Attributes:
+        audio: Final augmented mono signal.
+        applied: Ordered list of augmentation names applied to the signal.
+        metadata: Effect parameters sampled during augmentation, suitable for
+            storage in generation metadata.
+    """
+
     audio: np.ndarray
     applied: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
 
 
 def db_to_amp(db: float) -> float:
+    """Convert a decibel gain value to a linear amplitude multiplier.
+
+    Args:
+        db: Gain value in decibels.
+
+    Returns:
+        Linear amplitude multiplier.
+    """
     return float(10 ** (db / 20.0))
 
 
 def amp_to_db(amp: float) -> float:
+    """Convert a linear amplitude value to decibels with epsilon protection.
+
+    Args:
+        amp: Linear amplitude value.
+
+    Returns:
+        Decibel value after clamping near-zero input.
+    """
     return float(20.0 * math.log10(max(float(amp), EPS)))
 
 
 def ensure_float32(audio: np.ndarray, name: str = "audio") -> np.ndarray:
+    """Validate mono finite audio and return it as a float32 NumPy array.
+
+    Args:
+        audio: Input audio-like array.
+        name: Signal name used in validation error messages.
+
+    Returns:
+        Mono finite ``float32`` array.
+
+    Raises:
+        ValueError: If audio is empty, non-mono, or contains NaN/Inf values.
+    """
     audio = np.asarray(audio, dtype=np.float32)
 
     if audio.ndim != 1:
@@ -121,20 +183,53 @@ def ensure_float32(audio: np.ndarray, name: str = "audio") -> np.ndarray:
 
 
 def peak(audio: np.ndarray) -> float:
+    """Return the absolute peak amplitude after validating the signal.
+
+    Args:
+        audio: Mono audio samples.
+
+    Returns:
+        Maximum absolute sample amplitude.
+    """
     audio = ensure_float32(audio)
     return float(np.max(np.abs(audio)))
 
 
 def rms(audio: np.ndarray) -> float:
+    """Compute the linear RMS level of a mono audio signal.
+
+    Args:
+        audio: Mono audio samples.
+
+    Returns:
+        Linear RMS value.
+    """
     audio = ensure_float32(audio)
     return float(np.sqrt(np.mean(audio ** 2) + EPS))
 
 
 def rms_db(audio: np.ndarray) -> float:
+    """Compute RMS level in decibels.
+
+    Args:
+        audio: Mono audio samples.
+
+    Returns:
+        RMS level expressed in decibels.
+    """
     return amp_to_db(rms(audio))
 
 
 def limit_peak(audio: np.ndarray, peak_limit: float = 0.98) -> np.ndarray:
+    """Scale audio down only when its absolute peak exceeds the configured limit.
+
+    Args:
+        audio: Mono audio samples.
+        peak_limit: Maximum allowed absolute amplitude.
+
+    Returns:
+        Peak-limited ``float32`` audio.
+    """
     audio = ensure_float32(audio)
 
     current_peak = peak(audio)
@@ -146,14 +241,42 @@ def limit_peak(audio: np.ndarray, peak_limit: float = 0.98) -> np.ndarray:
 
 
 def chance(rng: random.Random, probability: float) -> bool:
+    """Return whether a random draw falls below a probability threshold.
+
+    Args:
+        rng: Python random generator.
+        probability: Probability between 0 and 1.
+
+    Returns:
+        ``True`` when the sampled value activates an effect.
+    """
     return rng.random() < probability
 
 
 def rand_uniform(rng: random.Random, min_value: float, max_value: float) -> float:
+    """Draw a floating-point value from an inclusive configuration range.
+
+    Args:
+        rng: Python random generator.
+        min_value: Lower bound.
+        max_value: Upper bound.
+
+    Returns:
+        Sampled float value.
+    """
     return float(rng.uniform(min_value, max_value))
 
 
 def apply_gain(audio: np.ndarray, gain_db: float) -> np.ndarray:
+    """Apply a constant gain in decibels to the whole signal.
+
+    Args:
+        audio: Mono audio samples.
+        gain_db: Gain amount in decibels.
+
+    Returns:
+        Gain-adjusted ``float32`` audio.
+    """
     audio = ensure_float32(audio)
     return (audio * db_to_amp(gain_db)).astype(np.float32)
 
@@ -165,6 +288,18 @@ def butter_filter(
     filter_type: str,
     order: int = 4,
 ) -> np.ndarray:
+    """Apply a Butterworth SOS filter and return float32 audio.
+
+    Args:
+        audio: Mono audio samples.
+        sample_rate: Sample rate in Hz.
+        cutoff: Cutoff frequency or frequency pair accepted by scipy.
+        filter_type: Butterworth filter type, such as ``"lowpass"``.
+        order: Filter order.
+
+    Returns:
+        Filtered ``float32`` audio.
+    """
     audio = ensure_float32(audio)
 
     sos = butter(
@@ -180,6 +315,16 @@ def butter_filter(
 
 
 def lowpass(audio: np.ndarray, sample_rate: int, cutoff_hz: float) -> np.ndarray:
+    """Apply a low-pass filter with cutoff clamped to the valid Nyquist range.
+
+    Args:
+        audio: Mono audio samples.
+        sample_rate: Sample rate in Hz.
+        cutoff_hz: Desired cutoff frequency.
+
+    Returns:
+        Low-pass filtered audio.
+    """
     nyquist = sample_rate / 2.0
     cutoff_hz = min(float(cutoff_hz), nyquist - 100.0)
     cutoff_hz = max(cutoff_hz, 100.0)
@@ -194,6 +339,16 @@ def lowpass(audio: np.ndarray, sample_rate: int, cutoff_hz: float) -> np.ndarray
 
 
 def highpass(audio: np.ndarray, sample_rate: int, cutoff_hz: float) -> np.ndarray:
+    """Apply a high-pass filter with a safe minimum cutoff.
+
+    Args:
+        audio: Mono audio samples.
+        sample_rate: Sample rate in Hz.
+        cutoff_hz: Desired cutoff frequency.
+
+    Returns:
+        High-pass filtered audio.
+    """
     cutoff_hz = max(float(cutoff_hz), 20.0)
 
     return butter_filter(
@@ -206,6 +361,20 @@ def highpass(audio: np.ndarray, sample_rate: int, cutoff_hz: float) -> np.ndarra
 
 
 def bandpass(audio: np.ndarray, sample_rate: int, low_hz: float, high_hz: float) -> np.ndarray:
+    """Apply a band-pass filter after validating and clamping the frequency range.
+
+    Args:
+        audio: Mono audio samples.
+        sample_rate: Sample rate in Hz.
+        low_hz: Lower cutoff frequency.
+        high_hz: Upper cutoff frequency.
+
+    Returns:
+        Band-pass filtered audio.
+
+    Raises:
+        ValueError: If the low cutoff is greater than or equal to the high cutoff.
+    """
     nyquist = sample_rate / 2.0
 
     low_hz = max(float(low_hz), 20.0)
@@ -230,9 +399,18 @@ def phone_filter(
     lowpass_hz: float = 3400.0,
 ) -> np.ndarray:
     """
-    Simule téléphone / appel voix classique :
-    - coupe les graves
-    - coupe les aigus
+    Simulate a classic phone or voice-call band limit.
+
+    The filter removes low-end rumble and high-end detail.
+
+    Args:
+        audio: Mono audio samples.
+        sample_rate: Sample rate in Hz.
+        highpass_hz: Lower cutoff of the simulated phone band.
+        lowpass_hz: Upper cutoff of the simulated phone band.
+
+    Returns:
+        Band-limited and peak-protected audio.
     """
     audio = bandpass(
         audio,
@@ -252,10 +430,21 @@ def three_band_eq(
     high_gain_db: float,
 ) -> np.ndarray:
     """
-    EQ simple et rapide :
+    Fast three-band EQ.
+
     - low : < 250 Hz
-    - mid : 250 Hz à 4000 Hz
+    - mid : 250 Hz to 4000 Hz
     - high : > 4000 Hz
+
+    Args:
+        audio: Mono audio samples.
+        sample_rate: Sample rate in Hz.
+        low_gain_db: Gain applied to the low band.
+        mid_gain_db: Gain applied to the mid band.
+        high_gain_db: Gain applied to the high band.
+
+    Returns:
+        Equalized and peak-protected audio.
     """
     audio = ensure_float32(audio)
 
@@ -294,7 +483,14 @@ def three_band_eq(
 
 def soft_saturation(audio: np.ndarray, drive_db: float = 6.0) -> np.ndarray:
     """
-    Saturation douce type préampli / micro cheap.
+    Apply soft saturation similar to a cheap mic or preamp.
+
+    Args:
+        audio: Mono audio samples.
+        drive_db: Input drive before the tanh waveshaper.
+
+    Returns:
+        Saturated and peak-protected audio.
     """
     audio = ensure_float32(audio)
 
@@ -307,8 +503,16 @@ def soft_saturation(audio: np.ndarray, drive_db: float = 6.0) -> np.ndarray:
 
 def hard_clipping(audio: np.ndarray, threshold: float = 0.8) -> np.ndarray:
     """
-    Clipping dur.
-    À utiliser avec une probabilité faible.
+    Apply hard clipping.
+
+    Use this with a low probability.
+
+    Args:
+        audio: Mono audio samples.
+        threshold: Absolute clipping threshold before rescaling.
+
+    Returns:
+        Clipped ``float32`` audio.
     """
     audio = ensure_float32(audio)
 
@@ -326,12 +530,22 @@ def static_compressor(
     makeup_gain_db: float = 0.0,
 ) -> np.ndarray:
     """
-    Compression simple et rapide.
-    Pas un compresseur studio complet, mais efficace pour simuler :
+    Fast static compressor.
+
+    This is not a full studio compressor, but it is useful to simulate:
     - Discord
-    - téléphone
+    - phone calls
     - micro gaming
     - webcam
+
+    Args:
+        audio: Mono audio samples.
+        threshold_db: Level above which gain reduction is applied.
+        ratio: Compression ratio used above the threshold.
+        makeup_gain_db: Optional gain added after compression.
+
+    Returns:
+        Compressed and peak-protected audio.
     """
     audio = ensure_float32(audio)
 
@@ -362,8 +576,20 @@ def light_reverb(
     num_reflections: int = 6,
 ) -> np.ndarray:
     """
-    Reverb légère très CPU-friendly.
-    On évite la convolution lourde pour rester adapté à un petit PC.
+    Lightweight CPU-friendly reverb.
+
+    This avoids expensive convolution so the pipeline stays usable on small machines.
+
+    Args:
+        audio: Mono audio samples.
+        sample_rate: Sample rate in Hz.
+        rng: Python random generator used for reflection delays and gains.
+        wet: Wet signal amount mixed back into the dry signal.
+        decay_ms: Approximate decay window in milliseconds.
+        num_reflections: Number of synthetic reflections to add.
+
+    Returns:
+        Reverberated and peak-protected audio.
     """
     audio = ensure_float32(audio)
 
@@ -391,8 +617,16 @@ def light_reverb(
 
 def quantize_audio(audio: np.ndarray, bits: int = 10) -> np.ndarray:
     """
-    Simule une quantification cheap.
-    Utile pour webcam ou vieux micro.
+    Simulate low-bit quantization.
+
+    Useful for webcam, low-quality microphone, or cheap capture artifacts.
+
+    Args:
+        audio: Mono audio samples.
+        bits: Number of quantization bits.
+
+    Returns:
+        Quantized ``float32`` audio with the same length as input.
     """
     audio = ensure_float32(audio)
 
@@ -416,8 +650,21 @@ def random_dropouts(
     max_ms: float = 80.0,
 ) -> np.ndarray:
     """
-    Simule de petites pertes réseau VoIP.
-    À utiliser rarement.
+    Simulate short VoIP-like network dropouts.
+
+    Use sparingly.
+
+    Args:
+        audio: Mono audio samples.
+        sample_rate: Sample rate in Hz.
+        rng: Python random generator used for dropout positions and lengths.
+        min_count: Minimum number of dropout regions.
+        max_count: Maximum number of dropout regions.
+        min_ms: Minimum dropout duration in milliseconds.
+        max_ms: Maximum dropout duration in milliseconds.
+
+    Returns:
+        Audio with short faded silent gaps.
     """
     audio = ensure_float32(audio)
     out = audio.copy()
@@ -456,15 +703,29 @@ def ffmpeg_codec_simulation(
     bitrate_kbps: int = 24,
 ) -> np.ndarray:
     """
-    Simule un codec réel via FFmpeg.
+    Simulate a real codec roundtrip through FFmpeg.
 
-    Nécessite FFmpeg installé.
-    Si FFmpeg n'est pas disponible, cette fonction lève une erreur.
+    Requires FFmpeg. If FFmpeg is not available, this function raises an error.
+
+    Args:
+        audio: Mono audio samples.
+        sample_rate: Sample rate in Hz.
+        codec: Codec name. Supported values are ``"opus"`` and ``"mp3"``.
+        bitrate_kbps: Target bitrate for the encoded temporary file.
+
+    Returns:
+        Decoded audio after the lossy codec roundtrip, trimmed or padded to the
+        original length.
+
+    Raises:
+        RuntimeError: If FFmpeg is missing, encoding fails, decoding fails, or
+            the decoded sample rate is invalid.
+        ValueError: If ``codec`` is unsupported.
     """
     audio = ensure_float32(audio)
 
     if shutil.which("ffmpeg") is None:
-        raise RuntimeError("FFmpeg introuvable. Codec augmentation ignorée.")
+        raise RuntimeError("FFmpeg not found. Codec augmentation skipped.")
 
     codec = codec.lower().strip()
 
@@ -569,16 +830,22 @@ def apply_random_augmentations(
     name: str = "audio",
 ) -> AugmentResult:
     """
-    Pipeline modulaire d'augmentations.
+    Modular augmentation pipeline.
 
-    Entrée :
-    - audio mono float32
-    - longueur attendue : 3 secondes à 16 kHz
+    Args:
+        audio: Mono ``float32`` audio. Its length must match
+            ``cfg.sample_rate * cfg.duration_sec``.
+        cfg: Augmentation configuration controlling probabilities and ranges.
+        rng: Optional Python random generator for deterministic augmentation.
+        allow_codec: Whether FFmpeg codec simulation is allowed for this call.
+        name: Signal name used in validation error messages.
 
-    Sortie :
-    - audio augmenté
-    - liste des augmentations appliquées
-    - metadata utile
+    Returns:
+        ``AugmentResult`` containing final audio, applied effect names, and
+        metadata describing sampled parameters.
+
+    Raises:
+        ValueError: If input audio is invalid or has the wrong duration.
     """
     if rng is None:
         rng = random.Random()
@@ -600,7 +867,7 @@ def apply_random_augmentations(
 
     out = audio.copy()
 
-    # Gain léger
+    # Light gain
     if chance(rng, cfg.p_gain):
         gain_db = rand_uniform(rng, cfg.gain_min_db, cfg.gain_max_db)
         out = apply_gain(out, gain_db)
@@ -609,7 +876,7 @@ def apply_random_augmentations(
         applied.append("gain")
         metadata["gain_db"] = round(gain_db, 4)
 
-    # EQ 3 bandes
+    # Three-band EQ
     if chance(rng, cfg.p_eq):
         low_gain_db = rand_uniform(rng, cfg.eq_gain_min_db, cfg.eq_gain_max_db)
         mid_gain_db = rand_uniform(rng, cfg.eq_gain_min_db, cfg.eq_gain_max_db)
@@ -628,7 +895,7 @@ def apply_random_augmentations(
         metadata["eq_mid_gain_db"] = round(mid_gain_db, 4)
         metadata["eq_high_gain_db"] = round(high_gain_db, 4)
 
-    # Téléphone / VoIP bandlimited
+    # Phone / VoIP band limiting
     if chance(rng, cfg.p_phone_filter):
         hp = rand_uniform(
             rng,
@@ -678,7 +945,7 @@ def apply_random_augmentations(
         metadata["compressor_threshold_db"] = round(threshold_db, 4)
         metadata["compressor_ratio"] = round(ratio, 4)
 
-    # Saturation douce
+    # Soft saturation
     if chance(rng, cfg.p_saturation):
         drive_db = rand_uniform(
             rng,
@@ -691,7 +958,7 @@ def apply_random_augmentations(
         applied.append("saturation")
         metadata["saturation_drive_db"] = round(drive_db, 4)
 
-    # Clipping dur
+    # Hard clipping
     if chance(rng, cfg.p_clipping):
         threshold = rand_uniform(
             rng,
@@ -704,7 +971,7 @@ def apply_random_augmentations(
         applied.append("clipping")
         metadata["clipping_threshold"] = round(threshold, 4)
 
-    # Reverb légère
+    # Lightweight reverb
     if chance(rng, cfg.p_reverb):
         wet = rand_uniform(rng, cfg.reverb_wet_min, cfg.reverb_wet_max)
         decay_ms = rand_uniform(
@@ -732,7 +999,7 @@ def apply_random_augmentations(
         metadata["reverb_decay_ms"] = round(decay_ms, 4)
         metadata["reverb_reflections"] = reflections
 
-    # Quantization cheap
+    # Low-bit quantization
     if chance(rng, cfg.p_quantization):
         bits = rng.randint(cfg.quantization_bits_min, cfg.quantization_bits_max)
 
@@ -741,7 +1008,7 @@ def apply_random_augmentations(
         applied.append("quantization")
         metadata["quantization_bits"] = bits
 
-    # Petites pertes réseau VoIP
+    # Short VoIP-like dropouts
     if chance(rng, cfg.p_dropout):
         out = random_dropouts(
             out,
@@ -756,7 +1023,7 @@ def apply_random_augmentations(
         applied.append("dropout")
         metadata["dropout"] = True
 
-    # Codec réel via FFmpeg
+    # Real codec roundtrip through FFmpeg
     if allow_codec and chance(rng, cfg.p_codec):
         codec = rng.choice(cfg.codec_choices)
 

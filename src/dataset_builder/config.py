@@ -1,3 +1,11 @@
+"""Typed YAML configuration loaders for every dataset pipeline stage.
+
+The project stores user-editable settings in ``configs/dataset_config.yaml``.
+This module converts those YAML dictionaries into typed dataclasses used by the
+preprocessing and generation scripts. Relative paths are resolved from the
+repository root so commands can be launched from a consistent project context.
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 import yaml
@@ -5,6 +13,31 @@ import yaml
 
 @dataclass
 class CleanPreprocessingConfig:
+    """Settings for converting raw clean speech files into prepared chunks.
+
+    Attributes:
+        input_dir: Folder containing raw clean speech recordings.
+        output_dir: Folder where prepared clean chunks are written.
+        metadata_dir: Folder where clean metadata and errors are written.
+        logs_dir: Folder where preprocessing logs are written.
+        sample_rate: Target sample rate in Hz.
+        mono: Whether multichannel files should be downmixed to mono.
+        chunk_duration_sec: Duration of each fixed chunk in seconds.
+        max_files: Optional cap on the number of source files to process.
+        shuffle_files: Whether to shuffle source files before applying max_files.
+        random_seed: Seed used for deterministic file ordering.
+        pad_short_files: Whether short speech files should be zero-padded.
+        normalize_rms: Whether to normalize clean speech loudness.
+        target_rms_db: Target RMS level for clean speech normalization.
+        max_gain_db: Maximum gain allowed during normalization.
+        peak_limit: Maximum accepted absolute amplitude.
+        min_duration_sec: Minimum source duration unless padding is enabled.
+        silence_threshold_db: Threshold used by silence detection.
+        min_non_silent_ratio: Minimum active-sample ratio accepted per chunk.
+        max_workers: Number of preprocessing worker processes.
+        skip_existing: Whether already written chunks should be skipped.
+        allowed_extensions: Source file extensions accepted by discovery.
+    """
     input_dir: Path
     output_dir: Path
     metadata_dir: Path
@@ -43,9 +76,21 @@ class CleanPreprocessingConfig:
 
     @property
     def chunk_samples(self) -> int:
+        """Return the configured chunk duration as a number of samples.
+
+        Returns:
+            Integer sample count computed from ``sample_rate`` and
+            ``chunk_duration_sec``.
+        """
         return int(self.sample_rate * self.chunk_duration_sec)
 
     def to_dict(self) -> dict:
+        """Return a multiprocessing-friendly dictionary representation.
+
+        Returns:
+            Plain dictionary containing serializable values. Paths are converted
+            to strings so the object can be passed to subprocess workers.
+        """
         return {
             "input_dir": str(self.input_dir),
             "output_dir": str(self.output_dir),
@@ -72,10 +117,23 @@ class CleanPreprocessingConfig:
 
 
 def load_clean_config(config_path: str | Path) -> CleanPreprocessingConfig:
+    """Load clean speech preprocessing settings from YAML.
+
+    Args:
+        config_path: Path to ``dataset_config.yaml``.
+
+    Returns:
+        ``CleanPreprocessingConfig`` with resolved paths and typed values.
+
+    Raises:
+        FileNotFoundError: If the YAML file does not exist.
+        KeyError: If the required ``clean_preprocessing`` section or required
+            path keys are missing.
+    """
     config_path = Path(config_path).resolve()
 
     if not config_path.exists():
-        raise FileNotFoundError(f"Config introuvable : {config_path}")
+        raise FileNotFoundError(f"Config not found: {config_path}")
 
     project_root = config_path.parents[1]
 
@@ -85,6 +143,14 @@ def load_clean_config(config_path: str | Path) -> CleanPreprocessingConfig:
     cfg = raw["clean_preprocessing"]
 
     def resolve_path(path_value: str) -> Path:
+        """Resolve one clean preprocessing path from YAML.
+
+        Args:
+            path_value: Absolute or project-relative path string.
+
+        Returns:
+            Resolved ``Path`` instance.
+        """
         path = Path(path_value)
         if path.is_absolute():
             return path
@@ -128,6 +194,28 @@ def load_clean_config(config_path: str | Path) -> CleanPreprocessingConfig:
 
 @dataclass
 class NoisePreprocessingConfig:
+    """Settings for converting raw noise files into prepared chunks.
+
+    Attributes:
+        input_dir: Folder containing raw background noise recordings.
+        output_dir: Folder where prepared noise chunks are written.
+        metadata_dir: Folder where noise metadata and errors are written.
+        logs_dir: Folder where preprocessing logs are written.
+        sample_rate: Target sample rate in Hz.
+        mono: Whether multichannel noise should be downmixed to mono.
+        chunk_duration_sec: Duration of each fixed chunk in seconds.
+        max_files: Optional cap on the number of source files to process.
+        shuffle_files: Whether to shuffle source files before applying max_files.
+        random_seed: Seed used for deterministic file ordering.
+        repeat_short_files: Whether short noise files can be tiled to one chunk.
+        min_duration_sec: Minimum source duration before rejection.
+        silence_threshold_db: Threshold used by silence detection.
+        min_non_silent_ratio: Minimum active-sample ratio accepted per chunk.
+        peak_limit: Maximum accepted absolute amplitude.
+        max_workers: Number of preprocessing worker processes.
+        skip_existing: Whether already written chunks should be skipped.
+        allowed_extensions: Source file extensions accepted by discovery.
+    """
     input_dir: Path
     output_dir: Path
     metadata_dir: Path
@@ -163,9 +251,21 @@ class NoisePreprocessingConfig:
 
     @property
     def chunk_samples(self) -> int:
+        """Return the configured chunk duration as a number of samples.
+
+        Returns:
+            Integer sample count computed from ``sample_rate`` and
+            ``chunk_duration_sec``.
+        """
         return int(self.sample_rate * self.chunk_duration_sec)
 
     def to_dict(self) -> dict:
+        """Return a multiprocessing-friendly dictionary representation.
+
+        Returns:
+            Plain dictionary containing serializable values. Paths are converted
+            to strings so the object can be passed to subprocess workers.
+        """
         return {
             "input_dir": str(self.input_dir),
             "output_dir": str(self.output_dir),
@@ -189,10 +289,23 @@ class NoisePreprocessingConfig:
 
 
 def load_noise_config(config_path: str | Path) -> NoisePreprocessingConfig:
+    """Load noise preprocessing settings from YAML.
+
+    Args:
+        config_path: Path to ``dataset_config.yaml``.
+
+    Returns:
+        ``NoisePreprocessingConfig`` with resolved paths and typed values.
+
+    Raises:
+        FileNotFoundError: If the YAML file does not exist.
+        KeyError: If the required ``noise_preprocessing`` section or required
+            path keys are missing.
+    """
     config_path = Path(config_path).resolve()
 
     if not config_path.exists():
-        raise FileNotFoundError(f"Config introuvable : {config_path}")
+        raise FileNotFoundError(f"Config not found: {config_path}")
 
     project_root = config_path.parents[1]
 
@@ -202,6 +315,14 @@ def load_noise_config(config_path: str | Path) -> NoisePreprocessingConfig:
     cfg = raw["noise_preprocessing"]
 
     def resolve_path(path_value: str) -> Path:
+        """Resolve one noise preprocessing path from YAML.
+
+        Args:
+            path_value: Absolute or project-relative path string.
+
+        Returns:
+            Resolved ``Path`` instance.
+        """
         path = Path(path_value)
         if path.is_absolute():
             return path
@@ -243,6 +364,39 @@ def load_noise_config(config_path: str | Path) -> NoisePreprocessingConfig:
 
 @dataclass
 class DatasetGenerationConfig:
+    """Settings for generating final noisy/clean paired samples.
+
+    Attributes:
+        clean_dir: Folder containing prepared clean chunks.
+        noise_dir: Folder containing prepared noise chunks.
+        output_dir: Folder where generated split folders are written.
+        metadata_dir: Folder where generation metadata and errors are written.
+        logs_dir: Folder where generation logs are written.
+        sample_rate: Expected sample rate in Hz.
+        duration_sec: Duration of each generated pair.
+        num_train_samples: Number of training pairs to generate.
+        num_val_samples: Number of validation pairs to generate.
+        num_test_samples: Number of test pairs to generate.
+        snr_min_db: Lower bound for random SNR selection.
+        snr_max_db: Upper bound for random SNR selection.
+        min_clean_rms_db: Minimum accepted RMS for selected clean chunks.
+        min_noise_rms_db: Minimum accepted RMS for selected noise chunks.
+        peak_limit: Maximum accepted absolute amplitude after mixing.
+        avoid_clipping: Whether mixes exceeding peak_limit are attenuated.
+        apply_gain_to_target: Whether anti-clipping gain is applied to targets.
+        batch_size: Number of generated samples flushed per metadata batch.
+        max_workers: Number of generation worker processes.
+        seed: Base deterministic seed.
+        deterministic: Whether sample selection is reproducible.
+        skip_existing: Whether existing output pairs should be skipped.
+        save_noise: Whether to store the exact added noise in split folders.
+        apply_clean_augment: Whether to augment clean speech before mixing.
+        apply_noise_augment: Whether to augment noise before mixing.
+        apply_post_noisy_augment: Whether to augment final noisy audio.
+        post_noisy_augment_probability: Probability for post-mix augmentation.
+        template_mix: Optional novice-mode template schedule.
+        allowed_extensions: Generated input extensions accepted by discovery.
+    """
     clean_dir: Path
     noise_dir: Path
     output_dir: Path
@@ -280,13 +434,27 @@ class DatasetGenerationConfig:
     apply_post_noisy_augment: bool = False
     post_noisy_augment_probability: float = 0.10
 
+    template_mix: list[dict] | None = None
+
     allowed_extensions: tuple = (".wav",)
 
     @property
     def chunk_samples(self) -> int:
+        """Return the generated pair duration as a number of samples.
+
+        Returns:
+            Integer sample count computed from ``sample_rate`` and
+            ``duration_sec``.
+        """
         return int(self.sample_rate * self.duration_sec)
 
     def to_dict(self) -> dict:
+        """Return a multiprocessing-friendly dictionary representation.
+
+        Returns:
+            Plain dictionary containing serializable values used to initialize
+            generation worker processes.
+        """
         return {
             "clean_dir": str(self.clean_dir),
             "noise_dir": str(self.noise_dir),
@@ -315,15 +483,29 @@ class DatasetGenerationConfig:
             "apply_noise_augment": self.apply_noise_augment,
             "apply_post_noisy_augment": self.apply_post_noisy_augment,
             "post_noisy_augment_probability": self.post_noisy_augment_probability,
+            "template_mix": self.template_mix or [],
             "allowed_extensions": list(self.allowed_extensions),
         }
 
 
 def load_generation_config(config_path: str | Path) -> DatasetGenerationConfig:
+    """Load noisy/clean generation settings from YAML.
+
+    Args:
+        config_path: Path to ``dataset_config.yaml``.
+
+    Returns:
+        ``DatasetGenerationConfig`` with resolved paths and typed values.
+
+    Raises:
+        FileNotFoundError: If the YAML file does not exist.
+        KeyError: If the required ``generation`` section or required path keys
+            are missing.
+    """
     config_path = Path(config_path).resolve()
 
     if not config_path.exists():
-        raise FileNotFoundError(f"Config introuvable : {config_path}")
+        raise FileNotFoundError(f"Config not found: {config_path}")
 
     project_root = config_path.parents[1]
 
@@ -333,6 +515,14 @@ def load_generation_config(config_path: str | Path) -> DatasetGenerationConfig:
     cfg = raw["generation"]
 
     def resolve_path(path_value: str) -> Path:
+        """Resolve one generation path from YAML.
+
+        Args:
+            path_value: Absolute or project-relative path string.
+
+        Returns:
+            Resolved ``Path`` instance.
+        """
         path = Path(path_value)
         if path.is_absolute():
             return path
@@ -377,6 +567,8 @@ def load_generation_config(config_path: str | Path) -> DatasetGenerationConfig:
         post_noisy_augment_probability=float(
             cfg.get("post_noisy_augment_probability", 0.10)
         ),
+
+        template_mix=cfg.get("template_mix", []) or [],
 
         allowed_extensions=tuple(
             ext.lower() for ext in cfg.get("allowed_extensions", [".wav"])

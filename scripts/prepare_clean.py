@@ -1,3 +1,11 @@
+"""Prepare clean speech files into validated fixed-length chunks.
+
+This command reads the ``clean_preprocessing`` section from
+``configs/dataset_config.yaml`` and converts raw speech recordings into reusable
+mono WAV chunks. It writes successful chunk metadata and per-file/per-chunk
+errors to CSV so the dataset can be audited before generation.
+"""
+
 from pathlib import Path
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -35,6 +43,23 @@ from src.dataset_builder.metadata import (
 
 
 def process_one_file(file_path: str, cfg_dict: dict) -> dict:
+    """Load, normalize, split, validate, and save chunks for one clean file.
+
+    Args:
+        file_path: Source clean speech file path serialized as a string for
+            multiprocessing compatibility.
+        cfg_dict: Plain dictionary produced by ``CleanPreprocessingConfig.to_dict``.
+
+    Returns:
+        Dictionary with three keys:
+        ``metadata`` contains rows for successfully written chunks, ``errors``
+        contains structured error rows, and ``num_chunks`` counts valid chunks.
+
+    Notes:
+        Exceptions are captured into the returned ``errors`` list so one corrupt
+        source file does not stop the whole preprocessing job.
+    """
+
     cfg = CleanPreprocessingConfig(
         input_dir=Path(cfg_dict["input_dir"]),
         output_dir=Path(cfg_dict["output_dir"]),
@@ -193,6 +218,13 @@ def process_one_file(file_path: str, cfg_dict: dict) -> dict:
 
 
 def main() -> None:
+    """Run the clean speech preprocessing stage from dataset_config.yaml.
+
+    Returns:
+        None. The function writes WAV chunks, metadata CSV files, error CSV
+        files, and timestamped logs as side effects.
+    """
+
     config_path = PROJECT_ROOT / "configs" / "dataset_config.yaml"
     cfg = load_clean_config(config_path)
 
@@ -208,7 +240,7 @@ def main() -> None:
 
     logger = setup_logger(log_file)
 
-    logger.info("Démarrage preprocessing CLEAN")
+    logger.info("Starting CLEAN preprocessing")
     logger.info(f"Input dir : {cfg.input_dir}")
     logger.info(f"Output dir : {cfg.output_dir}")
     logger.info(f"Sample rate : {cfg.sample_rate}")
@@ -227,10 +259,10 @@ def main() -> None:
     if cfg.max_files is not None:
         files = files[:cfg.max_files]
 
-    logger.info(f"Nombre de fichiers trouvés : {len(files)}")
+    logger.info(f"Files selected: {len(files)}")
 
     if not files:
-        logger.warning("Aucun fichier audio trouvé.")
+        logger.warning("No audio files found.")
         return
 
     total_chunks = 0
@@ -264,11 +296,11 @@ def main() -> None:
                 total_chunks += result["num_chunks"]
                 total_errors += len(result["errors"])
 
-    logger.info("Preprocessing terminé")
-    logger.info(f"Chunks générés : {total_chunks}")
-    logger.info(f"Erreurs / fichiers ignorés : {total_errors}")
+    logger.info("Preprocessing completed")
+    logger.info(f"Generated chunks: {total_chunks}")
+    logger.info(f"Errors / skipped files: {total_errors}")
     logger.info(f"Metadata : {metadata_file}")
-    logger.info(f"Erreurs : {errors_file}")
+    logger.info(f"Errors: {errors_file}")
     logger.info(f"Logs : {log_file}")
 
 

@@ -1,3 +1,15 @@
+"""Cropping and chunking utilities for prepared audio and generated pairs.
+
+The dataset pipeline uses two complementary strategies:
+
+* deterministic fixed chunks during preprocessing, so raw files can be converted
+  into reusable clean/noise assets;
+* random crops during generation, so each noisy/clean pair can sample different
+  regions from prepared assets while preserving alignment.
+
+All crop offsets are expressed in samples, not seconds, to keep metadata exact.
+"""
+
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
@@ -8,6 +20,15 @@ import soundfile as sf
 
 @dataclass
 class CropResult:
+    """Audio crop payload with source offsets expressed in samples.
+
+    Attributes:
+        audio: Cropped mono audio as a ``float32`` NumPy array.
+        start_sample: Inclusive start offset in the source audio.
+        end_sample: Exclusive end offset in the source audio.
+        num_samples: Number of samples in ``audio``.
+    """
+
     audio: np.ndarray
     start_sample: int
     end_sample: int
@@ -15,17 +36,42 @@ class CropResult:
 
 
 def duration_to_samples(duration_sec: float, sample_rate: int) -> int:
+    """Convert a duration in seconds to a rounded sample count.
+
+    Args:
+        duration_sec: Duration expressed in seconds.
+        sample_rate: Sample rate in Hz.
+
+    Returns:
+        Number of samples corresponding to the duration.
+    """
     return int(round(duration_sec * sample_rate))
 
 
 def make_rng(seed: int | None = None) -> np.random.Generator:
+    """Create a NumPy random generator for deterministic crop selection.
+
+    Args:
+        seed: Optional seed. Passing the same seed reproduces crop positions.
+
+    Returns:
+        NumPy random generator instance.
+    """
     return np.random.default_rng(seed)
 
 
 def stable_seed_from_text(text: str, base_seed: int = 42) -> int:
     """
-    Crée une seed stable à partir d'un texte.
-    Utile pour le multiprocessing : chaque fichier/sample peut avoir une seed unique.
+    Create a stable seed from text.
+
+    Useful for multiprocessing because each file or sample can receive a unique seed.
+
+    Args:
+        text: Stable text identifier, such as a path or sample id.
+        base_seed: Project-level seed offset.
+
+    Returns:
+        Unsigned 32-bit seed derived from the text and base seed.
     """
     h = hashlib.sha1(text.encode("utf-8")).hexdigest()
     value = int(h[:8], 16)
@@ -33,6 +79,17 @@ def stable_seed_from_text(text: str, base_seed: int = 42) -> int:
 
 
 def ensure_float32(audio: np.ndarray) -> np.ndarray:
+    """Validate that an audio array is finite and return it as float32.
+
+    Args:
+        audio: Audio-like array.
+
+    Returns:
+        ``float32`` NumPy array.
+
+    Raises:
+        ValueError: If the array contains NaN or infinite values.
+    """
     audio = np.asarray(audio, dtype=np.float32)
 
     if not np.all(np.isfinite(audio)):
@@ -43,10 +100,20 @@ def ensure_float32(audio: np.ndarray) -> np.ndarray:
 
 def to_mono(audio: np.ndarray) -> np.ndarray:
     """
-    Convertit un audio stéréo/multicanal en mono.
-    Shape attendue :
+    Convert stereo or multichannel audio to mono.
+
+    Expected shapes:
     - mono : (samples,)
     - stereo : (samples, channels)
+
+    Args:
+        audio: Mono or channel-last multichannel audio.
+
+    Returns:
+        Mono audio array.
+
+    Raises:
+        ValueError: If ``audio`` has an unsupported shape.
     """
     if audio.ndim == 1:
         return audio
@@ -63,11 +130,23 @@ def pad_audio(
     mode: str = "zero",
 ) -> np.ndarray:
     """
-    Complète un audio trop court jusqu'à target_samples.
+    Pad audio that is shorter than target_samples.
 
     mode:
-    - zero : ajoute du silence
-    - repeat : répète l'audio
+    - zero: add silence
+    - repeat: tile the input audio
+
+    Args:
+        audio: Mono audio samples.
+        target_samples: Required output length.
+        mode: Padding strategy, either ``"zero"`` or ``"repeat"``.
+
+    Returns:
+        Audio exactly ``target_samples`` long.
+
+    Raises:
+        ValueError: If repeat padding is requested for empty audio or if the mode
+            is unknown.
     """
     audio = ensure_float32(audio)
 
@@ -98,14 +177,27 @@ def random_crop_array(
     pad_mode: str = "zero",
 ) -> CropResult:
     """
-    Prend un crop aléatoire dans un tableau audio.
+    Take a random crop from an audio array.
 
-    Cas possibles :
-    - audio plus long que crop_samples : crop aléatoire
-    - audio exactement crop_samples : retourne l'audio
-    - audio plus court :
-        - pad_if_short=False : erreur
-        - pad_if_short=True : padding
+    Cases:
+    - audio longer than crop_samples: random crop
+    - audio exactly crop_samples: return unchanged
+    - audio shorter than crop_samples:
+        - pad_if_short=False: raise an error
+        - pad_if_short=True: pad the signal
+
+    Args:
+        audio: Mono source audio.
+        crop_samples: Exact number of samples to return.
+        rng: NumPy generator used to draw the crop start.
+        pad_if_short: Whether shorter audio should be padded instead of rejected.
+        pad_mode: Padding mode passed to ``pad_audio``.
+
+    Returns:
+        ``CropResult`` containing the crop and source offsets.
+
+    Raises:
+        ValueError: If audio is non-mono, too short without padding, or invalid.
     """
     audio = ensure_float32(audio)
 
@@ -158,8 +250,21 @@ def center_crop_array(
     pad_mode: str = "zero",
 ) -> CropResult:
     """
-    Crop centré.
-    Utile pour debug ou validation déterministe.
+    Take a centered crop.
+
+    Useful for debugging or deterministic validation.
+
+    Args:
+        audio: Mono source audio.
+        crop_samples: Exact number of samples to return.
+        pad_if_short: Whether shorter audio should be padded instead of rejected.
+        pad_mode: Padding mode passed to ``pad_audio``.
+
+    Returns:
+        ``CropResult`` centered in the source audio when possible.
+
+    Raises:
+        ValueError: If audio is non-mono, too short without padding, or invalid.
     """
     audio = ensure_float32(audio)
 
@@ -205,11 +310,23 @@ def aligned_random_crop_pair(
     pad_mode: str = "zero",
 ) -> tuple[CropResult, CropResult]:
     """
-    Crop aligné pour un couple clean/noisy déjà appairé.
+    Take aligned random crops from an already paired clean/noisy example.
 
-    Important :
-    clean et noisy doivent avoir la même durée.
-    On utilise le même start_sample pour les deux.
+    Clean and noisy must have the same duration. The same start sample is used for both.
+
+    Args:
+        clean: Clean target audio.
+        noisy: Noisy input audio aligned with ``clean``.
+        crop_samples: Exact number of samples to return for each signal.
+        rng: NumPy generator used to draw the shared crop start.
+        pad_if_short: Whether short pairs should be padded.
+        pad_mode: Padding mode passed to ``pad_audio``.
+
+    Returns:
+        Tuple ``(clean_crop, noisy_crop)`` with matching offsets.
+
+    Raises:
+        ValueError: If arrays are not mono, not aligned, too short, or invalid.
     """
     clean = ensure_float32(clean)
     noisy = ensure_float32(noisy)
@@ -260,15 +377,26 @@ def random_crop_for_mix(
     pad_short_noise: bool = True,
 ) -> tuple[CropResult, CropResult]:
     """
-    Crop pour génération speech enhancement.
+    Crop clean and noise audio for speech enhancement generation.
 
     clean :
-    - doit généralement être assez long
-    - si trop court, mieux vaut ignorer sauf si pad_short_clean=True
+    - should generally be long enough
+    - if too short, it is better to skip unless pad_short_clean=True
 
     noise :
-    - peut être crop aléatoirement
-    - si trop court, on peut le répéter avec pad_mode='repeat'
+    - can be randomly cropped
+    - if too short, it can be repeated with pad_mode='repeat'
+
+    Args:
+        clean: Clean speech source audio.
+        noise: Background noise source audio.
+        crop_samples: Exact output length for both signals.
+        rng: NumPy generator used for crop selection.
+        pad_short_clean: Whether short speech can be zero-padded.
+        pad_short_noise: Whether short noise can be repeated.
+
+    Returns:
+        Tuple ``(clean_crop, noise_crop)`` ready for SNR mixing.
     """
     clean_crop = random_crop_array(
         clean,
@@ -296,13 +424,25 @@ def fixed_chunks_array(
     pad_last: bool = False,
 ) -> list[CropResult]:
     """
-    Découpe déterministe en chunks fixes.
+    Split audio deterministically into fixed chunks.
 
-    Utile pour preprocessing :
+    Useful for preprocessing:
     - clean_chunks
     - noise_chunks
 
-    Contrairement au random crop, ici on découpe tout le fichier.
+    Unlike random cropping, this walks through the full file.
+
+    Args:
+        audio: Mono source audio.
+        chunk_samples: Exact length of each output chunk.
+        drop_last: Whether to discard the final incomplete chunk.
+        pad_last: Whether to zero-pad an incomplete final chunk when kept.
+
+    Returns:
+        List of ``CropResult`` items ordered by source position.
+
+    Raises:
+        ValueError: If input is non-mono or contains invalid values.
     """
     audio = ensure_float32(audio)
 
@@ -361,7 +501,14 @@ def fixed_chunks_array(
 
 def get_wav_info(path: str | Path) -> dict:
     """
-    Récupère les infos sans charger tout le fichier en RAM.
+    Read audio metadata without loading the full file into memory.
+
+    Args:
+        path: WAV/FLAC/audio path readable by soundfile.
+
+    Returns:
+        Dictionary containing path, sample rate, channel count, frame count,
+        duration, format, and subtype.
     """
     path = Path(path)
     info = sf.info(path)
@@ -386,11 +533,24 @@ def random_crop_wav_file(
     pad_mode: str = "zero",
 ) -> CropResult:
     """
-    Random crop directement depuis un fichier WAV/FLAC sans charger tout le fichier.
+    Randomly crop from a WAV/FLAC file without loading the whole file.
 
-    Très utile pour gros dataset :
-    au lieu de charger 3 minutes d'audio,
-    on lit seulement 3 secondes.
+    Useful for large datasets: read only the requested crop instead of loading a full file.
+
+    Args:
+        path: Prepared audio file path.
+        crop_samples: Exact number of samples to read.
+        expected_sample_rate: Required file sample rate.
+        rng: NumPy generator used to draw the crop start.
+        pad_if_short: Whether short files should be padded instead of rejected.
+        pad_mode: Padding strategy passed to ``pad_audio``.
+
+    Returns:
+        ``CropResult`` with audio and source offsets.
+
+    Raises:
+        ValueError: If sample rate is wrong, the file is too short without
+            padding, or loaded samples are invalid.
     """
     path = Path(path)
     info = sf.info(path)
@@ -455,17 +615,18 @@ def random_crop_clean_noise_files(
     seed: int | None = None,
 ) -> tuple[CropResult, CropResult]:
     """
-    Version haut niveau pour génération noisy.
+    High-level helper for noisy dataset generation.
 
-    clean_path :
-    - fichier clean mono 16 kHz
+    Args:
+        clean_path: Prepared clean mono file.
+        noise_path: Prepared noise mono file.
+        sample_rate: Expected sample rate for both files.
+        duration_sec: Requested crop duration in seconds.
+        seed: Optional deterministic crop seed.
 
-    noise_path :
-    - fichier noise mono 16 kHz
-
-    Retour :
-    - clean_crop de 3s
-    - noise_crop de 3s
+    Returns:
+        Tuple ``(clean_crop, noise_crop)``. Clean files must be long enough;
+        short noise files are repeated.
     """
     crop_samples = duration_to_samples(duration_sec, sample_rate)
     rng = make_rng(seed)

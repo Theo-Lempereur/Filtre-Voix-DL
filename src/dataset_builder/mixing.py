@@ -1,3 +1,13 @@
+"""SNR-controlled clean/noise mixing for paired speech enhancement samples.
+
+This module creates the final supervised pair used by the denoising model:
+``noisy = clean + scaled_noise``. It enforces duration, sample-rate-derived
+length, silence thresholds, clipping protection, and diagnostic metadata.
+
+All functions expect mono ``float32`` arrays shaped as ``(samples,)`` once the
+preprocessing stage has prepared clean and noise chunks.
+"""
+
 from dataclasses import dataclass
 import math
 import random
@@ -10,6 +20,21 @@ EPS = 1e-12
 
 @dataclass
 class MixConfig:
+    """Configuration controlling SNR mixing, silence filtering, and clipping safety.
+
+    Attributes:
+        sample_rate: Expected audio sample rate in Hz.
+        duration_sec: Expected duration of each generated sample.
+        snr_min_db: Lower bound used when drawing random SNR values.
+        snr_max_db: Upper bound used when drawing random SNR values.
+        min_clean_rms_db: Minimum accepted clean speech RMS level.
+        min_noise_rms_db: Minimum accepted raw noise RMS level.
+        peak_limit: Maximum absolute amplitude allowed after mixing.
+        avoid_clipping: Whether to attenuate mixtures that exceed ``peak_limit``.
+        apply_gain_to_target: Whether the same anti-clipping gain should also be
+            applied to the clean target, keeping target and noisy aligned.
+    """
+
     sample_rate: int = 16000
     duration_sec: float = 3.0
 
@@ -20,17 +45,33 @@ class MixConfig:
     min_clean_rms_db: float = -45.0
     min_noise_rms_db: float = -60.0
 
-    # Sécurité audio
+    # Audio safety
     peak_limit: float = 0.98
     avoid_clipping: bool = True
 
-    # Si True, applique le même gain à noisy, clean et noise
-    # quand le mix risque de clipper.
+    # If True, apply the same gain to noisy, clean, and noise when the mix may clip.
     apply_gain_to_target: bool = True
 
 
 @dataclass
 class MixResult:
+    """Mixed audio arrays and diagnostic metrics for one generated sample.
+
+    Attributes:
+        noisy: Final model input, containing clean speech plus scaled noise.
+        clean_target: Final model target aligned with ``noisy``.
+        noise_scaled: Exact noise signal added to the clean speech.
+        snr_db: Actual measured SNR after scaling and optional gain.
+        clean_rms_db: RMS level of the clean target.
+        noise_rms_db_before: RMS level of the raw selected noise chunk.
+        noise_rms_db_after: RMS level of the scaled noise.
+        noisy_rms_db: RMS level of the final noisy signal.
+        peak_clean: Absolute peak of the clean target.
+        peak_noise: Absolute peak of the scaled noise.
+        peak_noisy: Absolute peak of the noisy signal.
+        global_gain_db: Anti-clipping gain applied to the mixture, in dB.
+    """
+
     noisy: np.ndarray
     clean_target: np.ndarray
     noise_scaled: np.ndarray
@@ -48,15 +89,43 @@ class MixResult:
 
 
 def db_to_amp(db: float) -> float:
+    """Convert a decibel gain value to a linear amplitude multiplier.
+
+    Args:
+        db: Gain value in decibels.
+
+    Returns:
+        Linear amplitude multiplier.
+    """
     return float(10 ** (db / 20.0))
 
 
 def amp_to_db(amp: float) -> float:
+    """Convert a linear amplitude value to decibels with epsilon protection.
+
+    Args:
+        amp: Linear amplitude value.
+
+    Returns:
+        Decibel value after clamping near-zero input.
+    """
     amp = max(float(amp), EPS)
     return float(20.0 * math.log10(amp))
 
 
 def ensure_float32(audio: np.ndarray, name: str = "audio") -> np.ndarray:
+    """Validate mono finite audio and return it as a float32 NumPy array.
+
+    Args:
+        audio: Input audio-like array.
+        name: Human-readable signal name used in error messages.
+
+    Returns:
+        Mono finite ``float32`` array.
+
+    Raises:
+        ValueError: If audio is empty, non-mono, or contains NaN/Inf values.
+    """
     audio = np.asarray(audio, dtype=np.float32)
 
     if audio.ndim != 1:
@@ -72,20 +141,56 @@ def ensure_float32(audio: np.ndarray, name: str = "audio") -> np.ndarray:
 
 
 def rms(audio: np.ndarray) -> float:
+    """Compute the linear RMS level of a mono audio signal.
+
+    Args:
+        audio: Mono audio samples.
+
+    Returns:
+        Linear RMS value.
+    """
     audio = ensure_float32(audio)
     return float(np.sqrt(np.mean(audio ** 2) + EPS))
 
 
 def rms_db(audio: np.ndarray) -> float:
+    """Compute RMS level in decibels.
+
+    Args:
+        audio: Mono audio samples.
+
+    Returns:
+        RMS level expressed in decibels.
+    """
     return amp_to_db(rms(audio))
 
 
 def peak(audio: np.ndarray) -> float:
+    """Return the absolute peak amplitude after validating the signal.
+
+    Args:
+        audio: Mono audio samples.
+
+    Returns:
+        Maximum absolute sample amplitude.
+    """
     audio = ensure_float32(audio)
     return float(np.max(np.abs(audio)))
 
 
 def validate_same_length(clean: np.ndarray, noise: np.ndarray) -> None:
+    """Raise an error when clean and noise arrays cannot be mixed sample-aligned.
+
+    Args:
+        clean: Clean speech samples.
+        noise: Noise samples.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If both arrays do not have exactly the same length.
+    """
     if len(clean) != len(noise):
         raise ValueError(
             f"Length mismatch: clean={len(clean)} samples, noise={len(noise)} samples."
@@ -97,6 +202,16 @@ def random_snr(
     snr_max_db: float = 20.0,
     rng: random.Random | None = None,
 ) -> float:
+    """Draw one SNR value from the configured range.
+
+    Args:
+        snr_min_db: Lower SNR bound.
+        snr_max_db: Upper SNR bound.
+        rng: Optional random generator for deterministic runs.
+
+    Returns:
+        Random SNR value in decibels.
+    """
     if rng is None:
         rng = random
 
@@ -109,13 +224,25 @@ def scale_noise_to_snr(
     snr_db: float,
 ) -> np.ndarray:
     """
-    Scale le bruit pour atteindre un SNR donné.
+    Scale noise to reach a target SNR.
 
-    Formule :
+    Formula:
     SNR dB = 20 * log10(clean_rms / noise_rms)
 
-    Donc :
+    Therefore:
     target_noise_rms = clean_rms / 10^(SNR/20)
+
+    Args:
+        clean: Mono clean speech samples.
+        noise: Mono noise samples with the same length as ``clean``.
+        snr_db: Target signal-to-noise ratio in decibels.
+
+    Returns:
+        Noise signal scaled so that ``clean`` and the result approximately match
+        the requested SNR.
+
+    Raises:
+        ValueError: If inputs are invalid, not aligned, or too silent to scale.
     """
     clean = ensure_float32(clean, "clean")
     noise = ensure_float32(noise, "noise")
@@ -139,6 +266,15 @@ def scale_noise_to_snr(
 
 
 def compute_real_snr_db(clean: np.ndarray, noise_scaled: np.ndarray) -> float:
+    """Compute the actual SNR after scaling and optional global gain.
+
+    Args:
+        clean: Clean target signal.
+        noise_scaled: Noise signal added to the clean target.
+
+    Returns:
+        Measured SNR in decibels.
+    """
     clean_rms = rms(clean)
     noise_rms = rms(noise_scaled)
 
@@ -153,11 +289,20 @@ def apply_common_gain_if_needed(
     apply_gain_to_target: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """
-    Évite le clipping.
+    Avoid clipping.
 
-    Très important :
-    Si on baisse le volume du noisy, il faut aussi baisser le clean target
-    avec le même gain, sinon le target ne correspond plus parfaitement.
+    If noisy is attenuated, the clean target must receive the same gain so the target
+    still matches the mixture.
+
+    Args:
+        clean: Clean target signal.
+        noise_scaled: Already SNR-scaled noise signal.
+        noisy: Sum of clean and scaled noise.
+        peak_limit: Maximum accepted absolute amplitude.
+        apply_gain_to_target: Whether to apply the same attenuation to ``clean``.
+
+    Returns:
+        Tuple ``(clean, noise_scaled, noisy, gain_db)`` after optional attenuation.
     """
     noisy_peak = peak(noisy)
 
@@ -188,17 +333,20 @@ def mix_clean_noise(
     cfg: MixConfig | None = None,
 ) -> MixResult:
     """
-    Mix principal pour speech enhancement.
+    Main speech enhancement mix function.
 
-    Entrée :
-    - clean : voix clean mono float32
-    - noise : bruit mono float32
-    - snr_db : SNR voulu
+    Args:
+        clean: Mono ``float32`` clean speech chunk.
+        noise: Mono ``float32`` noise chunk with the same length as ``clean``.
+        snr_db: Target SNR used to scale the noise.
+        cfg: Optional mixing configuration. Defaults to ``MixConfig()``.
 
-    Sortie :
-    - noisy : clean + bruit
-    - clean_target : clean correspondant au noisy
-    - noise_scaled : bruit réellement ajouté
+    Returns:
+        ``MixResult`` containing output arrays and diagnostic levels.
+
+    Raises:
+        ValueError: If lengths, duration, silence thresholds, or final numeric
+            checks fail.
     """
     if cfg is None:
         cfg = MixConfig()
@@ -288,6 +436,17 @@ def mix_with_random_snr(
     cfg: MixConfig | None = None,
     rng: random.Random | None = None,
 ) -> MixResult:
+    """Mix clean and noise audio after drawing a random target SNR.
+
+    Args:
+        clean: Mono clean speech chunk.
+        noise: Mono noise chunk.
+        cfg: Optional mixing configuration.
+        rng: Optional random generator for deterministic SNR draws.
+
+    Returns:
+        ``MixResult`` from ``mix_clean_noise``.
+    """
     if cfg is None:
         cfg = MixConfig()
 

@@ -1,3 +1,11 @@
+"""Run the final noisy/clean dataset generation stage from the active YAML config.
+
+The script is intentionally small: it loads the ``generation`` and
+``augmentations`` sections, then delegates all heavy work to
+``src.dataset_builder.dataset_generation``. It also passes the YAML path so the
+generator can save ``config_used.yaml`` next to the generated dataset.
+"""
+
 from pathlib import Path
 import sys
 
@@ -13,6 +21,12 @@ from src.dataset_builder.dataset_generation import (
 
 
 def main() -> None:
+    """Load generation and augmentation settings, then build the generated dataset.
+
+    Returns:
+        None. Generated WAV files, metadata CSV files, errors CSV files, logs,
+        and ``config_used.yaml`` are written as side effects.
+    """
     config_path = PROJECT_ROOT / "configs" / "dataset_config.yaml"
 
     cfg = load_generation_config(config_path)
@@ -21,6 +35,7 @@ def main() -> None:
     run_dataset_generation(
         cfg=cfg,
         augment_cfg=augment_cfg,
+        config_path=config_path,
     )
 
 

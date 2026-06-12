@@ -1,3 +1,10 @@
+"""CSV metadata helpers shared by dataset preprocessing scripts.
+
+The preprocessing stages write two CSV families: successful chunk metadata and
+structured errors. Keeping field names centralized prevents the clean and noise
+scripts from drifting apart.
+"""
+
 import csv
 from pathlib import Path
 
@@ -25,6 +32,15 @@ ERROR_METADATA_FIELDS = [
 
 
 def init_csv(path: Path, fieldnames: list[str]) -> None:
+    """Create or replace a CSV file with the expected header row.
+
+    Args:
+        path: Destination CSV path.
+        fieldnames: Ordered column names written to the header.
+
+    Returns:
+        None.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -33,6 +49,16 @@ def init_csv(path: Path, fieldnames: list[str]) -> None:
 
 
 def append_rows(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
+    """Append metadata rows to a CSV file when the current batch produced data.
+
+    Args:
+        path: Existing CSV path.
+        fieldnames: Ordered column names expected by the CSV writer.
+        rows: Row dictionaries to append.
+
+    Returns:
+        None. Empty row lists are ignored.
+    """
     if not rows:
         return
 

@@ -1,3 +1,11 @@
+"""Prepare raw noise files into validated fixed-length chunks.
+
+This command reads the ``noise_preprocessing`` section from
+``configs/dataset_config.yaml`` and converts raw background recordings into
+reusable mono WAV chunks. Short noise can optionally be repeated because
+background ambience is less sensitive to padding artifacts than speech.
+"""
+
 from pathlib import Path
 import sys
 import random as py_random
@@ -55,6 +63,19 @@ def make_noise_chunks(
     chunk_samples: int,
     repeat_short_files: bool = True,
 ) -> list[tuple[np.ndarray, int]]:
+    """Split noise into fixed chunks, optionally repeating short files.
+
+    Args:
+        audio: Mono noise samples.
+        chunk_samples: Exact number of samples required per chunk.
+        repeat_short_files: Whether a short noise file should be tiled to one
+            full chunk instead of being skipped.
+
+    Returns:
+        List of ``(chunk, start_sample)`` tuples. Repeated short files use
+        ``0`` as the source start offset.
+    """
+
     chunks = []
     audio_len = len(audio)
 
@@ -81,6 +102,21 @@ def make_noise_chunks(
 
 
 def process_one_noise_file(file_path: str, cfg_dict: dict) -> dict:
+    """Load, split, validate, and save chunks for one noise file.
+
+    Args:
+        file_path: Source noise file path serialized as a string for
+            multiprocessing compatibility.
+        cfg_dict: Plain dictionary produced by ``NoisePreprocessingConfig.to_dict``.
+
+    Returns:
+        Dictionary with ``metadata`` rows, ``errors`` rows, and ``num_chunks``.
+
+    Notes:
+        Exceptions are captured into the returned ``errors`` list so one corrupt
+        source file does not stop the whole preprocessing job.
+    """
+
     cfg = NoisePreprocessingConfig(
         input_dir=Path(cfg_dict["input_dir"]),
         output_dir=Path(cfg_dict["output_dir"]),
@@ -229,6 +265,13 @@ def process_one_noise_file(file_path: str, cfg_dict: dict) -> dict:
 
 
 def main() -> None:
+    """Run the noise preprocessing stage from dataset_config.yaml.
+
+    Returns:
+        None. The function writes WAV chunks, metadata CSV files, error CSV
+        files, and timestamped logs as side effects.
+    """
+
     config_path = PROJECT_ROOT / "configs" / "dataset_config.yaml"
     cfg = load_noise_config(config_path)
 
@@ -244,7 +287,7 @@ def main() -> None:
 
     logger = setup_logger(log_file)
 
-    logger.info("Démarrage preprocessing NOISE")
+    logger.info("Starting NOISE preprocessing")
     logger.info(f"Input dir : {cfg.input_dir}")
     logger.info(f"Output dir : {cfg.output_dir}")
     logger.info(f"Sample rate : {cfg.sample_rate}")
@@ -263,10 +306,10 @@ def main() -> None:
     if cfg.max_files is not None:
         files = files[:cfg.max_files]
 
-    logger.info(f"Nombre de fichiers noise sélectionnés : {len(files)}")
+    logger.info(f"Noise files selected: {len(files)}")
 
     if not files:
-        logger.warning("Aucun fichier audio noise trouvé.")
+        logger.warning("No noise audio files found.")
         return
 
     total_chunks = 0
@@ -300,11 +343,11 @@ def main() -> None:
                 total_chunks += result["num_chunks"]
                 total_errors += len(result["errors"])
 
-    logger.info("Preprocessing NOISE terminé")
-    logger.info(f"Chunks noise générés : {total_chunks}")
-    logger.info(f"Erreurs / fichiers ignorés : {total_errors}")
+    logger.info("NOISE preprocessing completed")
+    logger.info(f"Generated noise chunks: {total_chunks}")
+    logger.info(f"Errors / skipped files: {total_errors}")
     logger.info(f"Metadata : {metadata_file}")
-    logger.info(f"Erreurs : {errors_file}")
+    logger.info(f"Errors: {errors_file}")
     logger.info(f"Logs : {log_file}")
 
 

@@ -1,3 +1,15 @@
+"""Generate aligned noisy/clean dataset pairs from prepared speech and noise chunks.
+
+This module is the final stage of the data pipeline. It selects prepared clean
+speech chunks and prepared noise chunks, optionally applies augmentations, mixes
+them at controlled SNR values, writes aligned noisy/clean WAV files, and records
+metadata for traceability.
+
+Generation can run in a single process or through ``ProcessPoolExecutor``.
+Worker processes receive plain dictionaries rather than dataclass instances so
+the configuration stays easy to serialize.
+"""
+
 from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -8,6 +20,7 @@ import csv
 import json
 import logging
 import random
+import shutil
 import traceback
 
 import numpy as np
@@ -63,6 +76,7 @@ GEN_METADATA_FIELDS = [
     "clean_aug_metadata",
     "noise_aug_metadata",
     "post_noisy_aug_metadata",
+    "template_name",
 ]
 
 
@@ -82,7 +96,17 @@ _GEN_CFG: dict = {}
 _AUGMENT_CFG: dict = {}
 
 
+# CSV and logging helpers
+
 def setup_generation_logger(log_file: Path) -> logging.Logger:
+    """Create a generation logger that writes to both console and timestamped file.
+
+    Args:
+        log_file: Destination log file path.
+
+    Returns:
+        Configured ``logging.Logger`` instance.
+    """
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger("dataset_generation")
@@ -106,6 +130,15 @@ def setup_generation_logger(log_file: Path) -> logging.Logger:
 
 
 def init_csv_if_missing(path: Path, fieldnames: list[str]) -> None:
+    """Create a CSV file with a header only when it does not already exist.
+
+    Args:
+        path: CSV path to initialize.
+        fieldnames: Ordered CSV column names.
+
+    Returns:
+        None.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if path.exists():
@@ -117,6 +150,16 @@ def init_csv_if_missing(path: Path, fieldnames: list[str]) -> None:
 
 
 def append_rows(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
+    """Append normalized dictionaries to a CSV file.
+
+    Args:
+        path: CSV path to append to.
+        fieldnames: Ordered CSV column names.
+        rows: Raw row dictionaries. Missing fields are written as empty strings.
+
+    Returns:
+        None.
+    """
     if not rows:
         return
 
@@ -129,6 +172,14 @@ def append_rows(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
 
 
 def load_augmentation_section(config_path: str | Path) -> dict:
+    """Read the augmentation section from the project YAML configuration.
+
+    Args:
+        config_path: Path to ``dataset_config.yaml``.
+
+    Returns:
+        Augmentation section dictionary, or ``{"enabled": False}`` when absent.
+    """
     config_path = Path(config_path)
 
     with open(config_path, "r", encoding="utf-8") as f:
@@ -143,6 +194,17 @@ def _init_worker(
     cfg_dict: dict,
     augment_cfg: dict,
 ) -> None:
+    """Initialize per-process globals used by the sample generation worker.
+
+    Args:
+        clean_files: Prepared clean chunk paths serialized as strings.
+        noise_files: Prepared noise chunk paths serialized as strings.
+        cfg_dict: Generation configuration as a plain dictionary.
+        augment_cfg: Augmentation configuration as a plain dictionary.
+
+    Returns:
+        None.
+    """
     global _CLEAN_FILES
     global _NOISE_FILES
     global _GEN_CFG
@@ -154,17 +216,29 @@ def _init_worker(
     _AUGMENT_CFG = augment_cfg or {"enabled": False}
 
 
-def _make_augment_config() -> AugmentConfig:
+def _make_augment_config(gen_cfg: dict | None = None, augment_cfg: dict | None = None) -> AugmentConfig:
+    """Build an AugmentConfig from YAML dictionaries while ignoring unknown keys.
+
+    Args:
+        gen_cfg: Optional generation settings for the current sample.
+        augment_cfg: Optional augmentation settings for the current sample.
+
+    Returns:
+        ``AugmentConfig`` with sample rate and duration synchronized to the
+        effective generation settings.
+    """
+    gen_cfg = gen_cfg or _GEN_CFG
+    augment_cfg = augment_cfg or _AUGMENT_CFG
     valid_keys = {field.name for field in fields(AugmentConfig)}
 
     data = {
         key: value
-        for key, value in _AUGMENT_CFG.items()
+        for key, value in augment_cfg.items()
         if key in valid_keys
     }
 
-    data["sample_rate"] = int(_GEN_CFG["sample_rate"])
-    data["duration_sec"] = float(_GEN_CFG["duration_sec"])
+    data["sample_rate"] = int(gen_cfg["sample_rate"])
+    data["duration_sec"] = float(gen_cfg["duration_sec"])
 
     if "codec_choices" in data:
         data["codec_choices"] = tuple(data["codec_choices"])
@@ -172,21 +246,41 @@ def _make_augment_config() -> AugmentConfig:
     return AugmentConfig(**data)
 
 
-def _make_mix_config() -> MixConfig:
+def _make_mix_config(gen_cfg: dict | None = None) -> MixConfig:
+    """Build the SNR mixing configuration for one generated sample.
+
+    Args:
+        gen_cfg: Optional effective generation dictionary, including template
+            overrides when novice template mix is active.
+
+    Returns:
+        ``MixConfig`` used by the SNR mixer.
+    """
+    gen_cfg = gen_cfg or _GEN_CFG
     return MixConfig(
-        sample_rate=int(_GEN_CFG["sample_rate"]),
-        duration_sec=float(_GEN_CFG["duration_sec"]),
-        snr_min_db=float(_GEN_CFG["snr_min_db"]),
-        snr_max_db=float(_GEN_CFG["snr_max_db"]),
-        min_clean_rms_db=float(_GEN_CFG["min_clean_rms_db"]),
-        min_noise_rms_db=float(_GEN_CFG["min_noise_rms_db"]),
-        peak_limit=float(_GEN_CFG["peak_limit"]),
-        avoid_clipping=bool(_GEN_CFG["avoid_clipping"]),
-        apply_gain_to_target=bool(_GEN_CFG["apply_gain_to_target"]),
+        sample_rate=int(gen_cfg["sample_rate"]),
+        duration_sec=float(gen_cfg["duration_sec"]),
+        snr_min_db=float(gen_cfg["snr_min_db"]),
+        snr_max_db=float(gen_cfg["snr_max_db"]),
+        min_clean_rms_db=float(gen_cfg["min_clean_rms_db"]),
+        min_noise_rms_db=float(gen_cfg["min_noise_rms_db"]),
+        peak_limit=float(gen_cfg["peak_limit"]),
+        avoid_clipping=bool(gen_cfg["avoid_clipping"]),
+        apply_gain_to_target=bool(gen_cfg["apply_gain_to_target"]),
     )
 
 
 def _make_sample_seed(split: str, sample_index: int) -> int:
+    """Create a deterministic or system-random seed for one sample.
+
+    Args:
+        split: Dataset split name.
+        sample_index: Index within that split.
+
+    Returns:
+        Unsigned 32-bit seed. Deterministic mode derives it from base seed,
+        split, and index; non-deterministic mode uses system randomness.
+    """
     base_seed = int(_GEN_CFG["seed"])
 
     if bool(_GEN_CFG["deterministic"]):
@@ -197,6 +291,15 @@ def _make_sample_seed(split: str, sample_index: int) -> int:
 
 
 def _output_paths(split: str, sample_id: str) -> dict[str, Path]:
+    """Build all output paths for one generated sample.
+
+    Args:
+        split: Dataset split name.
+        sample_id: Stable sample identifier used as the WAV stem.
+
+    Returns:
+        Dictionary containing noisy, clean, and optional noise output paths.
+    """
     output_dir = Path(_GEN_CFG["output_dir"])
     split_dir = output_dir / split
 
@@ -208,6 +311,15 @@ def _output_paths(split: str, sample_id: str) -> dict[str, Path]:
 
 
 def _outputs_already_exist(paths: dict[str, Path]) -> bool:
+    """Return whether every required output already exists for skip-existing mode.
+
+    Args:
+        paths: Output path dictionary from ``_output_paths``.
+
+    Returns:
+        ``True`` when skip-existing mode is enabled and all required files are
+        present.
+    """
     if not bool(_GEN_CFG["skip_existing"]):
         return False
 
@@ -223,6 +335,19 @@ def _outputs_already_exist(paths: dict[str, Path]) -> bool:
 
 
 def _save_wav_atomic(path: Path, audio: np.ndarray, sample_rate: int) -> None:
+    """Write a WAV file through a temporary sibling path before replacing the target.
+
+    Args:
+        path: Final destination WAV path.
+        audio: Mono finite audio samples.
+        sample_rate: Output sample rate in Hz.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If audio is non-mono or contains non-finite values.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
 
     audio = np.asarray(audio, dtype=np.float32)
@@ -247,6 +372,20 @@ def _validate_final_pair(
     clean: np.ndarray,
     expected_samples: int,
 ) -> None:
+    """Validate generated noisy and clean arrays before writing them to disk.
+
+    Args:
+        noisy: Final noisy input signal.
+        clean: Final clean target signal.
+        expected_samples: Exact required sample count.
+
+    Returns:
+        None.
+
+    Raises:
+        ValueError: If either signal has the wrong length, shape, or finite
+            numeric status.
+    """
     if len(noisy) != expected_samples:
         raise ValueError(
             f"Invalid noisy length: {len(noisy)}, expected {expected_samples}"
@@ -268,6 +407,17 @@ def _validate_final_pair(
 
 
 def _generate_one_sample(split: str, sample_index: int) -> dict:
+    """Generate one noisy/clean pair and return CSV rows or a structured error.
+
+    Args:
+        split: Dataset split name.
+        sample_index: Index within the split.
+
+    Returns:
+        Dictionary with ``metadata``, ``errors``, ``generated``, and ``skipped``
+        keys. Exceptions are captured as error rows so long generation jobs can
+        continue processing other samples.
+    """
     sample_id = f"{split}_{sample_index:08d}"
 
     clean_path = ""
@@ -284,8 +434,10 @@ def _generate_one_sample(split: str, sample_index: int) -> dict:
                 "skipped": 1,
             }
 
-        sample_rate = int(_GEN_CFG["sample_rate"])
-        duration_sec = float(_GEN_CFG["duration_sec"])
+        gen_cfg, sample_augment_cfg, template_name = _effective_configs_for_sample(split, sample_index)
+
+        sample_rate = int(gen_cfg["sample_rate"])
+        duration_sec = float(gen_cfg["duration_sec"])
         expected_samples = int(sample_rate * duration_sec)
 
         sample_seed = _make_sample_seed(split, sample_index)
@@ -317,7 +469,7 @@ def _generate_one_sample(split: str, sample_index: int) -> dict:
         clean_audio = clean_crop.audio
         noise_audio = noise_crop.audio
 
-        augment_cfg = _make_augment_config()
+        augment_cfg = _make_augment_config(gen_cfg=gen_cfg, augment_cfg=sample_augment_cfg)
 
         clean_aug_applied = []
         noise_aug_applied = []
@@ -327,7 +479,7 @@ def _generate_one_sample(split: str, sample_index: int) -> dict:
         noise_aug_metadata = {}
         post_aug_metadata = {}
 
-        if bool(_GEN_CFG["apply_clean_augment"]):
+        if bool(gen_cfg["apply_clean_augment"]):
             clean_aug = apply_random_augmentations(
                 audio=clean_audio,
                 cfg=augment_cfg,
@@ -340,7 +492,7 @@ def _generate_one_sample(split: str, sample_index: int) -> dict:
             clean_aug_applied = clean_aug.applied
             clean_aug_metadata = clean_aug.metadata
 
-        if bool(_GEN_CFG["apply_noise_augment"]):
+        if bool(gen_cfg["apply_noise_augment"]):
             noise_aug = apply_random_augmentations(
                 audio=noise_audio,
                 cfg=augment_cfg,
@@ -353,7 +505,7 @@ def _generate_one_sample(split: str, sample_index: int) -> dict:
             noise_aug_applied = noise_aug.applied
             noise_aug_metadata = noise_aug.metadata
 
-        mix_cfg = _make_mix_config()
+        mix_cfg = _make_mix_config(gen_cfg=gen_cfg)
 
         mix_result = mix_with_random_snr(
             clean=clean_audio,
@@ -366,8 +518,8 @@ def _generate_one_sample(split: str, sample_index: int) -> dict:
         clean_target = mix_result.clean_target
         noise_scaled = mix_result.noise_scaled
 
-        if bool(_GEN_CFG["apply_post_noisy_augment"]):
-            p_post = float(_GEN_CFG["post_noisy_augment_probability"])
+        if bool(gen_cfg["apply_post_noisy_augment"]):
+            p_post = float(gen_cfg["post_noisy_augment_probability"])
 
             if py_rng.random() < p_post:
                 post_aug = apply_random_augmentations(
@@ -434,6 +586,7 @@ def _generate_one_sample(split: str, sample_index: int) -> dict:
             "clean_aug_metadata": json.dumps(clean_aug_metadata, ensure_ascii=False),
             "noise_aug_metadata": json.dumps(noise_aug_metadata, ensure_ascii=False),
             "post_noisy_aug_metadata": json.dumps(post_aug_metadata, ensure_ascii=False),
+            "template_name": template_name,
         }
 
         return {
@@ -462,6 +615,14 @@ def _generate_one_sample(split: str, sample_index: int) -> dict:
 
 
 def _split_counts(cfg: DatasetGenerationConfig) -> dict[str, int]:
+    """Return the requested number of generated samples for each dataset split.
+
+    Args:
+        cfg: Generation configuration.
+
+    Returns:
+        Mapping from split name to requested sample count.
+    """
     return {
         "train": cfg.num_train_samples,
         "val": cfg.num_val_samples,
@@ -469,7 +630,82 @@ def _split_counts(cfg: DatasetGenerationConfig) -> dict[str, int]:
     }
 
 
+def _global_sample_index(split: str, sample_index: int) -> int:
+    """Map a split-local index to the global generation order used by templates.
+
+    Args:
+        split: Dataset split name.
+        sample_index: Index inside that split.
+
+    Returns:
+        Global zero-based generation index across train, validation, and test.
+    """
+    counts = {
+        "train": int(_GEN_CFG.get("num_train_samples", 0)),
+        "val": int(_GEN_CFG.get("num_val_samples", 0)),
+        "test": int(_GEN_CFG.get("num_test_samples", 0)),
+    }
+    offsets = {
+        "train": 0,
+        "val": counts["train"],
+        "test": counts["train"] + counts["val"],
+    }
+    return offsets[split] + sample_index
+
+
+def _effective_configs_for_sample(split: str, sample_index: int) -> tuple[dict, dict, str]:
+    """Return template-specific generation and augmentation settings for one sample.
+
+    The novice GUI writes ``generation.template_mix`` as a sequence of template
+    blocks. This function maps the global sample index to the matching template,
+    then overlays template-specific generation and augmentation values.
+
+    Args:
+        split: Dataset split name.
+        sample_index: Index inside that split.
+
+    Returns:
+        Tuple ``(generation_config, augmentation_config, template_name)``.
+    """
+    template_mix = _GEN_CFG.get("template_mix") or []
+
+    if not template_mix:
+        return dict(_GEN_CFG), dict(_AUGMENT_CFG), ""
+
+    global_index = _global_sample_index(split, sample_index)
+    cursor = 0
+    selected = template_mix[-1]
+
+    for item in template_mix:
+        count = int(item.get("count", 0))
+        if count <= 0:
+            continue
+        if global_index < cursor + count:
+            selected = item
+            break
+        cursor += count
+
+    gen_cfg = dict(_GEN_CFG)
+    augment_cfg = dict(_AUGMENT_CFG)
+
+    for key, value in (selected.get("generation") or {}).items():
+        gen_cfg[key] = value
+
+    for key, value in (selected.get("augmentations") or {}).items():
+        augment_cfg[key] = value
+
+    return gen_cfg, augment_cfg, str(selected.get("name", ""))
+
+
 def _ensure_output_dirs(cfg: DatasetGenerationConfig) -> None:
+    """Create split output folders required by the generation stage.
+
+    Args:
+        cfg: Generation configuration.
+
+    Returns:
+        None.
+    """
     for split in ["train", "val", "test"]:
         (cfg.output_dir / split / "noisy").mkdir(parents=True, exist_ok=True)
         (cfg.output_dir / split / "clean").mkdir(parents=True, exist_ok=True)
@@ -481,7 +717,22 @@ def _ensure_output_dirs(cfg: DatasetGenerationConfig) -> None:
 def run_dataset_generation(
     cfg: DatasetGenerationConfig,
     augment_cfg: dict | None = None,
+    config_path: str | Path | None = None,
 ) -> None:
+    """Run the full noisy/clean generation stage and persist metadata.
+
+    Args:
+        cfg: Typed generation configuration.
+        augment_cfg: Optional raw augmentation dictionary loaded from YAML.
+        config_path: Optional YAML path copied to ``config_used.yaml`` for
+            dataset reproducibility.
+
+    Returns:
+        None.
+
+    Raises:
+        RuntimeError: If no prepared clean or noise files are available.
+    """
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
     cfg.metadata_dir.mkdir(parents=True, exist_ok=True)
     cfg.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -499,19 +750,25 @@ def run_dataset_generation(
     init_csv_if_missing(metadata_file, GEN_METADATA_FIELDS)
     init_csv_if_missing(errors_file, GEN_ERROR_FIELDS)
 
-    logger.info("Démarrage génération dataset noisy")
+    logger.info("Starting noisy dataset generation")
     logger.info(f"Clean dir : {cfg.clean_dir}")
     logger.info(f"Noise dir : {cfg.noise_dir}")
     logger.info(f"Output dir : {cfg.output_dir}")
     logger.info(f"Sample rate : {cfg.sample_rate}")
     logger.info(f"Duration : {cfg.duration_sec}s")
     logger.info(f"Chunk samples : {cfg.chunk_samples}")
-    logger.info(f"SNR range : {cfg.snr_min_db} à {cfg.snr_max_db} dB")
+    logger.info(f"SNR range : {cfg.snr_min_db} to {cfg.snr_max_db} dB")
     logger.info(f"Batch size : {cfg.batch_size}")
     logger.info(f"Workers : {cfg.max_workers}")
     logger.info(f"Skip existing : {cfg.skip_existing}")
     logger.info(f"Seed : {cfg.seed}")
     logger.info(f"Deterministic : {cfg.deterministic}")
+
+    if config_path is not None:
+        config_path = Path(config_path)
+        config_used_path = cfg.output_dir / "config_used.yaml"
+        shutil.copy2(config_path, config_used_path)
+        logger.info(f"Saved generation config snapshot: {config_used_path}")
 
     clean_files = discover_audio_files(
         cfg.clean_dir,
@@ -524,16 +781,16 @@ def run_dataset_generation(
     )
 
     if not clean_files:
-        raise RuntimeError(f"Aucun fichier clean trouvé dans : {cfg.clean_dir}")
+        raise RuntimeError(f"No clean files found in: {cfg.clean_dir}")
 
     if not noise_files:
-        raise RuntimeError(f"Aucun fichier noise trouvé dans : {cfg.noise_dir}")
+        raise RuntimeError(f"No noise files found in: {cfg.noise_dir}")
 
     clean_files = [str(path) for path in clean_files]
     noise_files = [str(path) for path in noise_files]
 
-    logger.info(f"Fichiers clean trouvés : {len(clean_files)}")
-    logger.info(f"Fichiers noise trouvés : {len(noise_files)}")
+    logger.info(f"Clean files found: {len(clean_files)}")
+    logger.info(f"Noise files found: {len(noise_files)}")
 
     split_counts = _split_counts(cfg)
 
@@ -553,7 +810,7 @@ def run_dataset_generation(
         )
 
         for split, count in split_counts.items():
-            logger.info(f"Génération split {split} : {count} samples")
+            logger.info(f"Generating split {split}: {count} samples")
 
             for batch_start in range(0, count, cfg.batch_size):
                 batch_end = min(batch_start + cfg.batch_size, count)
@@ -592,7 +849,7 @@ def run_dataset_generation(
         ) as executor:
 
             for split, count in split_counts.items():
-                logger.info(f"Génération split {split} : {count} samples")
+                logger.info(f"Generating split {split}: {count} samples")
 
                 for batch_start in range(0, count, cfg.batch_size):
                     batch_end = min(batch_start + cfg.batch_size, count)
@@ -629,10 +886,10 @@ def run_dataset_generation(
                         f"errors={len(error_rows)}"
                     )
 
-    logger.info("Génération terminée")
-    logger.info(f"Samples générés : {total_generated}")
-    logger.info(f"Samples ignorés car déjà existants : {total_skipped}")
-    logger.info(f"Erreurs : {total_errors}")
+    logger.info("Generation completed")
+    logger.info(f"Generated samples: {total_generated}")
+    logger.info(f"Skipped existing samples: {total_skipped}")
+    logger.info(f"Errors: {total_errors}")
     logger.info(f"Metadata : {metadata_file}")
     logger.info(f"Errors : {errors_file}")
     logger.info(f"Logs : {log_file}")
