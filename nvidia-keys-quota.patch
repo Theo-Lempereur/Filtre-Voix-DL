@@ -1,0 +1,1310 @@
+From 468b91e3963b560d8be6b20b41377d541f38d911 Mon Sep 17 00:00:00 2001
+From: dev <dev@local>
+Date: Tue, 16 Jun 2026 11:21:10 +0000
+Subject: [PATCH] feat(serve): NVIDIA models (BNR + Studio Voice) with API key
+ fallback + daily quota
+
+- serve/providers/nvidia_maxine.py: gRPC NVCF connector (transactional) for
+  Background Noise Removal and Studio Voice, faithful to NVIDIA-Maxine/nim-clients.
+- serve/keys.py: key resolution (user key = unlimited, shared key = quota).
+- serve/quota.py: SQLite daily quota per IP.
+- serve/server.py: /models lists NVIDIA models; /denoise routes + enforces key/quota;
+  new /quota endpoint; X-API-Key header; optional BNR intensity.
+- serve/test_client.html: optional NVIDIA key field + remaining-quota hint.
+- .env.example / requirements-serve.txt / serve/NVIDIA.md: config, deps, docs.
+- serve/tests: integration test (10 cases, no torch/network).
+---
+ .env.example                                  |  24 ++
+ .gitignore                                    |   5 +-
+ requirements-serve.txt                        |   4 +
+ serve/NVIDIA.md                               | 102 ++++++++
+ serve/keys.py                                 | 102 ++++++++
+ serve/providers/__init__.py                   |   0
+ serve/providers/_vendor/__init__.py           |   0
+ serve/providers/_vendor/bnr/__init__.py       |   0
+ serve/providers/_vendor/bnr/bnr_pb2.py        |  42 ++++
+ serve/providers/_vendor/bnr/bnr_pb2_grpc.py   | 110 +++++++++
+ .../_vendor/studio_voice/__init__.py          |   0
+ .../_vendor/studio_voice/studiovoice_pb2.py   |  40 ++++
+ .../studio_voice/studiovoice_pb2_grpc.py      | 112 +++++++++
+ serve/providers/nvidia_maxine.py              | 224 ++++++++++++++++++
+ serve/quota.py                                | 101 ++++++++
+ serve/server.py                               |  76 +++++-
+ serve/test_client.html                        |  41 ++++
+ serve/tests/__init__.py                       |   0
+ serve/tests/test_nvidia_integration.py        |  87 +++++++
+ 19 files changed, 1065 insertions(+), 5 deletions(-)
+ create mode 100644 serve/NVIDIA.md
+ create mode 100644 serve/keys.py
+ create mode 100644 serve/providers/__init__.py
+ create mode 100644 serve/providers/_vendor/__init__.py
+ create mode 100644 serve/providers/_vendor/bnr/__init__.py
+ create mode 100644 serve/providers/_vendor/bnr/bnr_pb2.py
+ create mode 100644 serve/providers/_vendor/bnr/bnr_pb2_grpc.py
+ create mode 100644 serve/providers/_vendor/studio_voice/__init__.py
+ create mode 100644 serve/providers/_vendor/studio_voice/studiovoice_pb2.py
+ create mode 100644 serve/providers/_vendor/studio_voice/studiovoice_pb2_grpc.py
+ create mode 100644 serve/providers/nvidia_maxine.py
+ create mode 100644 serve/quota.py
+ create mode 100644 serve/tests/__init__.py
+ create mode 100644 serve/tests/test_nvidia_integration.py
+
+diff --git a/.env.example b/.env.example
+index 4a377e8..bd86ee6 100644
+--- a/.env.example
++++ b/.env.example
+@@ -12,3 +12,27 @@ DEVICE=cpu
+ # (option) Origines autorisées pour CORS, séparées par des virgules.
+ # "*" = tout autorisé (pratique en dev). En prod : https://monsite.com
+ CORS_ORIGINS=*
++
++# ─────────────────────────────────────────────────────────────────────────────
++# Modèles NVIDIA hébergés (BNR + Studio Voice) — optionnel
++# ─────────────────────────────────────────────────────────────────────────────
++# (option) Notre clé NVIDIA PARTAGÉE. Sert de repli quand l'utilisateur ne
++# fournit pas la sienne. Soumise alors au quota journalier (FREE_DAILY_LIMIT).
++# Obtenir une clé gratuite (préfixe nvapi-) sur https://build.nvidia.com .
++# ⚠️ Ne committez JAMAIS cette valeur. Ce .env est ignoré par git.
++NVIDIA_API_KEY=
++
++# (requis pour utiliser les modèles NVIDIA) function-id de chaque NIM, copié
++# depuis la page « API » du modèle sur build.nvidia.com.
++NVIDIA_BNR_FUNCTION_ID=
++NVIDIA_STUDIOVOICE_FUNCTION_ID=
++
++# (option) Cible gRPC NVCF et timeout (s). Valeurs par défaut ci-dessous.
++NVIDIA_GRPC_TARGET=grpc.nvcf.nvidia.com:443
++NVIDIA_GRPC_TIMEOUT=60
++
++# (option) Limite journalière par IP en mode clé partagée. Défaut : 5.
++FREE_DAILY_LIMIT=5
++
++# (option) Emplacement du fichier SQLite de quota. Défaut : quota.sqlite3 à la racine.
++QUOTA_DB_PATH=
+diff --git a/.gitignore b/.gitignore
+index fae038b..6152937 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -33,4 +33,7 @@ Thumbs.db
+ # Data
+ data/processed/
+ data/metadata/
+-data/logs/
+\ No newline at end of file
++data/logs/
++# Base SQLite du quota (générée au runtime)
++quota.sqlite3
++quota.sqlite3-journal
+diff --git a/requirements-serve.txt b/requirements-serve.txt
+index 89262c3..078acbf 100644
+--- a/requirements-serve.txt
++++ b/requirements-serve.txt
+@@ -8,3 +8,7 @@ fastapi>=0.115.0
+ uvicorn[standard]>=0.32.0
+ python-multipart>=0.0.12
+ python-dotenv>=1.0.0
++# Modèles NVIDIA hébergés (connecteur gRPC NVCF). Optionnel si vous n'utilisez
++# que les checkpoints locaux.
++grpcio>=1.67,<1.69
++protobuf>=5.27,<6
+diff --git a/serve/NVIDIA.md b/serve/NVIDIA.md
+new file mode 100644
+index 0000000..e2a3f5d
+--- /dev/null
++++ b/serve/NVIDIA.md
+@@ -0,0 +1,102 @@
++# Modèles NVIDIA, clés API et quota
++
++Ce document décrit la couche ajoutée pour servir les modèles **NVIDIA Maxine**
++(Background Noise Removal + Studio Voice) à côté des checkpoints locaux, avec
++gestion de clé et limite d'usage.
++
++## Logique d'usage (en bref)
++
++| Cas | Clé utilisée | Limite |
++|---|---|---|
++| L'utilisateur fournit **sa** clé (`X-API-Key`) | la sienne | **aucune** de notre côté (NVIDIA applique la sienne) |
++| L'utilisateur ne fournit **rien** | notre clé partagée `NVIDIA_API_KEY` | **`FREE_DAILY_LIMIT` / jour / IP** (défaut : 5) |
++| Aucune clé (ni la sienne, ni la nôtre) | — | requête refusée (503) |
++
++Les modèles **locaux** (`.pt`) ne sont pas concernés : ni clé, ni quota.
++
++## 1. Obtenir une clé NVIDIA gratuite
++
++1. Créer un compte gratuit sur <https://build.nvidia.com> (NVIDIA Developer
++   Program, sans carte bancaire).
++2. Ouvrir un modèle, cliquer **Get API Key**. La clé est préfixée `nvapi-`.
++   Le tier gratuit donne ~1 000 crédits (jusqu'à 5 000 sur demande) et ~40
++   requêtes/minute — calibré pour des tests, pas pour de la production en boucle.
++
++> ⚠️ La clé partagée est *votre* clé. Comme tous les visiteurs « sans clé »
++> tapent dessus, gardez `FREE_DAILY_LIMIT` bas pour ne pas épuiser le budget.
++
++## 2. Récupérer les function-id
++
++Chaque NIM a un `function-id` propre, affiché sur la page **API** du modèle :
++
++- BNR : <https://build.nvidia.com/nvidia/bnr/api>
++- Studio Voice : <https://build.nvidia.com/nvidia/studiovoice/api>
++
++Copiez-les dans `NVIDIA_BNR_FUNCTION_ID` / `NVIDIA_STUDIOVOICE_FUNCTION_ID`.
++
++## 3. Configuration (`.env` du serveur)
++
++Le serveur lit ces variables via `load_dotenv` (voir `.env.example`) :
++
++```ini
++NVIDIA_API_KEY=nvapi-xxxxxxxx            # notre clé partagée (repli gratuit)
++NVIDIA_BNR_FUNCTION_ID=........-....-....
++NVIDIA_STUDIOVOICE_FUNCTION_ID=........-....-....
++FREE_DAILY_LIMIT=5                       # quota/jour/IP en mode partagé
++```
++
++Le `.env` est **ignoré par git** : aucune clé ne doit être committée.
++
++## 4. Où vivent les clés (et le malentendu « GitHub Secrets »)
++
++Au **runtime**, un serveur lit ses secrets depuis **son environnement**, pas
++depuis GitHub. Les **GitHub Secrets** (Actions) ne sont accessibles que dans un
++workflow CI/CD.
++
++- **Déploiement manuel (git pull sur le VPS)** → mettez les clés dans le `.env`
++  du serveur, ou dans les `Environment=` du service systemd
++  (`serve/INTEGRATION.md`). **N'utilisez pas** les GitHub Secrets ici.
++- **Déploiement via GitHub Actions** → là, stockez les clés en *repository
++  secrets* (Settings → Secrets and variables → Actions) et faites injecter par
++  le workflow dans l'environnement du serveur (ex. génération du `.env` ou
++  variables d'environnement du service). C'est le seul cas où GitHub Secrets
++  est pertinent.
++
++## 5. Vérifier une clé utilisateur
++
++Une validation de **forme** (préfixe `nvapi-`) est faite immédiatement. La
++validation **autoritaire** se fait au premier appel : si NVIDIA renvoie
++`UNAUTHENTICATED`, l'API répond **401** (« Clé NVIDIA invalide… »). On évite
++ainsi de brûler un crédit juste pour tester une clé.
++
++> Le **solde restant** d'une clé utilisateur n'est pas exposé par l'API NVIDIA
++> (seulement sur son dashboard) : on ne peut donc pas l'afficher. Le compteur de
++> quota ne concerne que **notre** clé partagée, lisible via `GET /quota`.
++
++## 6. Endpoints
++
++- `GET /models` — checkpoints locaux **+** modèles NVIDIA (`provider: "nvidia"`,
++  `requires_key: true`, `configured: <function-id présent ?>`).
++- `GET /quota` — `{limit, used, remaining, shared_key_configured}` pour l'IP
++  appelante.
++- `POST /denoise` — champs `file`, `model_id`, `intensity` (option BNR 0–1),
++  en-tête optionnel `X-API-Key`. Réponse : WAV. En mode partagé, l'en-tête
++  `X-Quota-Remaining` indique le reste du jour.
++
++## 7. Dépendances
++
++```bash
++pip install -r requirements-serve.txt   # ajoute grpcio + protobuf
++```
++
++Les stubs gRPC sont vendorisés dans `serve/providers/_vendor/` (générés depuis
++NVIDIA-Maxine/nim-clients, licence MIT) : pas besoin de recompiler les protos.
++
++## 8. Limites connues
++
++- Identification du quota **par IP** (zéro inscription) : contournable, et une
++  IP partagée (entreprise, 4G) compte pour un seul utilisateur. Acceptable pour
++  du « test gratuit ».
++- `X-Forwarded-For` n'est fiable que **derrière** un proxy de confiance (nginx).
++  N'exposez pas uvicorn directement à Internet.
++- Maxine attend du 48 kHz : l'audio entrant est ré-échantillonné avant envoi.
+diff --git a/serve/keys.py b/serve/keys.py
+new file mode 100644
+index 0000000..cf1c411
+--- /dev/null
++++ b/serve/keys.py
+@@ -0,0 +1,102 @@
++"""Résolution de la clé API et de la stratégie d'usage.
++
++Règle métier (demandée) :
++    - L'utilisateur fournit SA clé NVIDIA  -> on l'utilise, AUCUNE limite de
++      notre côté (NVIDIA applique la sienne).
++    - L'utilisateur ne fournit RIEN        -> on utilise NOTRE clé partagée
++      (si elle est configurée), avec une limite journalière par IP.
++    - Pas de clé du tout (ni la sienne, ni la nôtre) -> on refuse proprement.
++
++Aucune vraie valeur de clé ne vit dans le code ni dans le dépôt : la clé
++partagée est lue depuis la variable d'environnement ``NVIDIA_API_KEY`` (placée
++dans le ``.env`` du serveur, ignoré par git). La clé utilisateur, elle, arrive
++par l'en-tête HTTP ``X-API-Key`` et n'est jamais journalisée ni stockée.
++"""
++from __future__ import annotations
++
++import os
++from dataclasses import dataclass
++from enum import Enum
++
++
++class KeySource(str, Enum):
++    USER = "user"      # clé fournie par l'utilisateur -> illimité
++    SHARED = "shared"  # notre clé partagée -> quota journalier
++
++
++@dataclass(frozen=True)
++class KeyDecision:
++    api_key: str
++    source: KeySource
++    # True quand on doit faire respecter le quota journalier (mode partagé).
++    enforce_quota: bool
++
++
++def shared_key() -> str | None:
++    """Notre clé NVIDIA partagée, depuis l'environnement. None si absente."""
++    val = os.environ.get("NVIDIA_API_KEY", "").strip()
++    return val or None
++
++
++def looks_like_nvidia_key(value: str | None) -> bool:
++    """Validation de forme bon marché (ne consomme aucun crédit).
++
++    Les clés NVIDIA NIM / NGC sont préfixées ``nvapi-``. La validation
++    *autoritaire* se fait au premier vrai appel gRPC (un code UNAUTHENTICATED
++    est remonté en 401 par le connecteur). On évite ainsi de brûler un crédit
++    juste pour tester une clé.
++    """
++    if not value:
++        return False
++    return value.strip().startswith("nvapi-")
++
++
++class NoKeyAvailable(Exception):
++    """Ni clé utilisateur valide, ni clé partagée configurée."""
++
++
++class InvalidUserKey(Exception):
++    """L'utilisateur a fourni une clé, mais elle n'a pas le bon format."""
++
++
++def resolve_key(user_key: str | None) -> KeyDecision:
++    """Choisit la clé à utiliser et le régime (illimité vs quota).
++
++    Raises
++    ------
++    InvalidUserKey  : clé utilisateur fournie mais malformée.
++    NoKeyAvailable  : aucune clé utilisable.
++    """
++    user_key = (user_key or "").strip()
++
++    if user_key:
++        if not looks_like_nvidia_key(user_key):
++            raise InvalidUserKey(
++                "La clé fournie ne ressemble pas à une clé NVIDIA "
++                "(préfixe attendu : 'nvapi-')."
++            )
++        return KeyDecision(api_key=user_key, source=KeySource.USER, enforce_quota=False)
++
++    shared = shared_key()
++    if shared:
++        return KeyDecision(api_key=shared, source=KeySource.SHARED, enforce_quota=True)
++
++    raise NoKeyAvailable(
++        "Aucune clé disponible : ce modèle nécessite une clé NVIDIA. "
++        "Renseignez la vôtre, ou contactez l'administrateur du service."
++    )
++
++
++def client_ip(forwarded_for: str | None, peer: str | None) -> str:
++    """IP client pour le comptage de quota.
++
++    Derrière nginx (cf. INTEGRATION.md), l'en-tête ``X-Forwarded-For`` contient
++    l'IP réelle en première position. En accès direct, on retombe sur l'IP du
++    pair TCP. Note sécurité : ``X-Forwarded-For`` n'est fiable que DERRIÈRE un
++    proxy de confiance ; n'exposez pas l'API uvicorn directement à Internet.
++    """
++    if forwarded_for:
++        first = forwarded_for.split(",")[0].strip()
++        if first:
++            return first
++    return peer or "unknown"
+diff --git a/serve/providers/__init__.py b/serve/providers/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/serve/providers/_vendor/__init__.py b/serve/providers/_vendor/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/serve/providers/_vendor/bnr/__init__.py b/serve/providers/_vendor/bnr/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/serve/providers/_vendor/bnr/bnr_pb2.py b/serve/providers/_vendor/bnr/bnr_pb2.py
+new file mode 100644
+index 0000000..2371c03
+--- /dev/null
++++ b/serve/providers/_vendor/bnr/bnr_pb2.py
+@@ -0,0 +1,42 @@
++# -*- coding: utf-8 -*-
++# Generated by the protocol buffer compiler.  DO NOT EDIT!
++# NO CHECKED-IN PROTOBUF GENCODE
++# source: bnr.proto
++# Protobuf Python Version: 5.27.2
++"""Generated protocol buffer code."""
++from google.protobuf import descriptor as _descriptor
++from google.protobuf import descriptor_pool as _descriptor_pool
++from google.protobuf import runtime_version as _runtime_version
++from google.protobuf import symbol_database as _symbol_database
++from google.protobuf.internal import builder as _builder
++_runtime_version.ValidateProtobufRuntimeVersion(
++    _runtime_version.Domain.PUBLIC,
++    5,
++    27,
++    2,
++    '',
++    'bnr.proto'
++)
++# @@protoc_insertion_point(imports)
++
++_sym_db = _symbol_database.Default()
++
++
++
++
++DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\tbnr.proto\x12\x12nvidia.ai4m.bnr.v1\"F\n\x12\x45nhanceAudioConfig\x12\x1c\n\x0fintensity_ratio\x18\x01 \x01(\x02H\x00\x88\x01\x01\x42\x12\n\x10_intensity_ratio\"|\n\x13\x45nhanceAudioRequest\x12\x1b\n\x11\x61udio_stream_data\x18\x01 \x01(\x0cH\x00\x12\x38\n\x06\x63onfig\x18\x02 \x01(\x0b\x32&.nvidia.ai4m.bnr.v1.EnhanceAudioConfigH\x00\x42\x0e\n\x0cstream_input\"~\n\x14\x45nhanceAudioResponse\x12\x1b\n\x11\x61udio_stream_data\x18\x01 \x01(\x0cH\x00\x12\x38\n\x06\x63onfig\x18\x02 \x01(\x0b\x32&.nvidia.ai4m.bnr.v1.EnhanceAudioConfigH\x00\x42\x0f\n\rstream_output2n\n\x03\x42NR\x12g\n\x0c\x45nhanceAudio\x12\'.nvidia.ai4m.bnr.v1.EnhanceAudioRequest\x1a(.nvidia.ai4m.bnr.v1.EnhanceAudioResponse\"\x00(\x01\x30\x01\x62\x06proto3')
++
++_globals = globals()
++_builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
++_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'bnr_pb2', _globals)
++if not _descriptor._USE_C_DESCRIPTORS:
++  DESCRIPTOR._loaded_options = None
++  _globals['_ENHANCEAUDIOCONFIG']._serialized_start=33
++  _globals['_ENHANCEAUDIOCONFIG']._serialized_end=103
++  _globals['_ENHANCEAUDIOREQUEST']._serialized_start=105
++  _globals['_ENHANCEAUDIOREQUEST']._serialized_end=229
++  _globals['_ENHANCEAUDIORESPONSE']._serialized_start=231
++  _globals['_ENHANCEAUDIORESPONSE']._serialized_end=357
++  _globals['_BNR']._serialized_start=359
++  _globals['_BNR']._serialized_end=469
++# @@protoc_insertion_point(module_scope)
+diff --git a/serve/providers/_vendor/bnr/bnr_pb2_grpc.py b/serve/providers/_vendor/bnr/bnr_pb2_grpc.py
+new file mode 100644
+index 0000000..76288ac
+--- /dev/null
++++ b/serve/providers/_vendor/bnr/bnr_pb2_grpc.py
+@@ -0,0 +1,110 @@
++# Generated by the gRPC Python protocol compiler plugin. DO NOT EDIT!
++"""Client and server classes corresponding to protobuf-defined services."""
++import grpc
++import warnings
++
++import bnr_pb2 as bnr__pb2
++
++GRPC_GENERATED_VERSION = '1.67.1'
++GRPC_VERSION = grpc.__version__
++_version_not_supported = False
++
++try:
++    from grpc._utilities import first_version_is_lower
++    _version_not_supported = first_version_is_lower(GRPC_VERSION, GRPC_GENERATED_VERSION)
++except ImportError:
++    _version_not_supported = True
++
++if _version_not_supported:
++    raise RuntimeError(
++        f'The grpc package installed is at version {GRPC_VERSION},'
++        + f' but the generated code in bnr_pb2_grpc.py depends on'
++        + f' grpcio>={GRPC_GENERATED_VERSION}.'
++        + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
++        + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
++    )
++
++
++class BNRStub(object):
++    """The BNR service provides APIs to run the
++    BNR NIM.
++    """
++
++    def __init__(self, channel):
++        """Constructor.
++
++        Args:
++            channel: A grpc.Channel.
++        """
++        self.EnhanceAudio = channel.stream_stream(
++                '/nvidia.ai4m.bnr.v1.BNR/EnhanceAudio',
++                request_serializer=bnr__pb2.EnhanceAudioRequest.SerializeToString,
++                response_deserializer=bnr__pb2.EnhanceAudioResponse.FromString,
++                _registered_method=True)
++
++
++class BNRServicer(object):
++    """The BNR service provides APIs to run the
++    BNR NIM.
++    """
++
++    def EnhanceAudio(self, request_iterator, context):
++        """EnhanceAudio is a bidirectional streaming RPC to run the
++        BNR NIM on audio files.
++        
++        The client streams the input audio file in chunks in the input message and 
++        receives the output audio file in chunks in the output message.
++        
++        The client should only pass one audio file per RPC invocation.
++        """
++        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
++        context.set_details('Method not implemented!')
++        raise NotImplementedError('Method not implemented!')
++
++
++def add_BNRServicer_to_server(servicer, server):
++    rpc_method_handlers = {
++            'EnhanceAudio': grpc.stream_stream_rpc_method_handler(
++                    servicer.EnhanceAudio,
++                    request_deserializer=bnr__pb2.EnhanceAudioRequest.FromString,
++                    response_serializer=bnr__pb2.EnhanceAudioResponse.SerializeToString,
++            ),
++    }
++    generic_handler = grpc.method_handlers_generic_handler(
++            'nvidia.ai4m.bnr.v1.BNR', rpc_method_handlers)
++    server.add_generic_rpc_handlers((generic_handler,))
++    server.add_registered_method_handlers('nvidia.ai4m.bnr.v1.BNR', rpc_method_handlers)
++
++
++ # This class is part of an EXPERIMENTAL API.
++class BNR(object):
++    """The BNR service provides APIs to run the
++    BNR NIM.
++    """
++
++    @staticmethod
++    def EnhanceAudio(request_iterator,
++            target,
++            options=(),
++            channel_credentials=None,
++            call_credentials=None,
++            insecure=False,
++            compression=None,
++            wait_for_ready=None,
++            timeout=None,
++            metadata=None):
++        return grpc.experimental.stream_stream(
++            request_iterator,
++            target,
++            '/nvidia.ai4m.bnr.v1.BNR/EnhanceAudio',
++            bnr__pb2.EnhanceAudioRequest.SerializeToString,
++            bnr__pb2.EnhanceAudioResponse.FromString,
++            options,
++            channel_credentials,
++            insecure,
++            call_credentials,
++            compression,
++            wait_for_ready,
++            timeout,
++            metadata,
++            _registered_method=True)
+diff --git a/serve/providers/_vendor/studio_voice/__init__.py b/serve/providers/_vendor/studio_voice/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/serve/providers/_vendor/studio_voice/studiovoice_pb2.py b/serve/providers/_vendor/studio_voice/studiovoice_pb2.py
+new file mode 100644
+index 0000000..afb3594
+--- /dev/null
++++ b/serve/providers/_vendor/studio_voice/studiovoice_pb2.py
+@@ -0,0 +1,40 @@
++# -*- coding: utf-8 -*-
++# Generated by the protocol buffer compiler.  DO NOT EDIT!
++# NO CHECKED-IN PROTOBUF GENCODE
++# source: studiovoice.proto
++# Protobuf Python Version: 5.27.2
++"""Generated protocol buffer code."""
++from google.protobuf import descriptor as _descriptor
++from google.protobuf import descriptor_pool as _descriptor_pool
++from google.protobuf import runtime_version as _runtime_version
++from google.protobuf import symbol_database as _symbol_database
++from google.protobuf.internal import builder as _builder
++_runtime_version.ValidateProtobufRuntimeVersion(
++    _runtime_version.Domain.PUBLIC,
++    5,
++    27,
++    2,
++    '',
++    'studiovoice.proto'
++)
++# @@protoc_insertion_point(imports)
++
++_sym_db = _symbol_database.Default()
++
++
++
++
++DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x11studiovoice.proto\x12\x1anvidia.ai4m.studiovoice.v1\"B\n\x13\x45nhanceAudioRequest\x12\x1b\n\x11\x61udio_stream_data\x18\x01 \x01(\x0cH\x00\x42\x0e\n\x0cstream_input\"D\n\x14\x45nhanceAudioResponse\x12\x1b\n\x11\x61udio_stream_data\x18\x01 \x01(\x0cH\x00\x42\x0f\n\rstream_output2\x86\x01\n\x0bStudioVoice\x12w\n\x0c\x45nhanceAudio\x12/.nvidia.ai4m.studiovoice.v1.EnhanceAudioRequest\x1a\x30.nvidia.ai4m.studiovoice.v1.EnhanceAudioResponse\"\x00(\x01\x30\x01\x62\x06proto3')
++
++_globals = globals()
++_builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
++_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'studiovoice_pb2', _globals)
++if not _descriptor._USE_C_DESCRIPTORS:
++  DESCRIPTOR._loaded_options = None
++  _globals['_ENHANCEAUDIOREQUEST']._serialized_start=49
++  _globals['_ENHANCEAUDIOREQUEST']._serialized_end=115
++  _globals['_ENHANCEAUDIORESPONSE']._serialized_start=117
++  _globals['_ENHANCEAUDIORESPONSE']._serialized_end=185
++  _globals['_STUDIOVOICE']._serialized_start=188
++  _globals['_STUDIOVOICE']._serialized_end=322
++# @@protoc_insertion_point(module_scope)
+diff --git a/serve/providers/_vendor/studio_voice/studiovoice_pb2_grpc.py b/serve/providers/_vendor/studio_voice/studiovoice_pb2_grpc.py
+new file mode 100644
+index 0000000..5bfce9e
+--- /dev/null
++++ b/serve/providers/_vendor/studio_voice/studiovoice_pb2_grpc.py
+@@ -0,0 +1,112 @@
++# Generated by the gRPC Python protocol compiler plugin. DO NOT EDIT!
++"""Client and server classes corresponding to protobuf-defined services."""
++import grpc
++import warnings
++
++import studiovoice_pb2 as studiovoice__pb2
++
++GRPC_GENERATED_VERSION = '1.67.1'
++GRPC_VERSION = grpc.__version__
++_version_not_supported = False
++
++try:
++    from grpc._utilities import first_version_is_lower
++    _version_not_supported = first_version_is_lower(GRPC_VERSION, GRPC_GENERATED_VERSION)
++except ImportError:
++    _version_not_supported = True
++
++if _version_not_supported:
++    raise RuntimeError(
++        f'The grpc package installed is at version {GRPC_VERSION},'
++        + f' but the generated code in studiovoice_pb2_grpc.py depends on'
++        + f' grpcio>={GRPC_GENERATED_VERSION}.'
++        + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
++        + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
++    )
++
++
++class StudioVoiceStub(object):
++    """The StudioVoice service provides APIs to run the
++    Studio Voice NIM.
++    """
++
++    def __init__(self, channel):
++        """Constructor.
++
++        Args:
++            channel: A grpc.Channel.
++        """
++        self.EnhanceAudio = channel.stream_stream(
++                '/nvidia.ai4m.studiovoice.v1.StudioVoice/EnhanceAudio',
++                request_serializer=studiovoice__pb2.EnhanceAudioRequest.SerializeToString,
++                response_deserializer=studiovoice__pb2.EnhanceAudioResponse.FromString,
++                _registered_method=True)
++
++
++class StudioVoiceServicer(object):
++    """The StudioVoice service provides APIs to run the
++    Studio Voice NIM.
++    """
++
++    def EnhanceAudio(self, request_iterator, context):
++        """EnhanceAudio is a bidirectional streaming RPC to run the
++        Studio Voice NIM on audio files.
++        
++        The client streams the input audio file in chunks in
++        the input message and receives the output audio file
++        in chunks in the output message.
++        
++        The client should only pass one audio file per RPC
++        invocation.
++        """
++        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
++        context.set_details('Method not implemented!')
++        raise NotImplementedError('Method not implemented!')
++
++
++def add_StudioVoiceServicer_to_server(servicer, server):
++    rpc_method_handlers = {
++            'EnhanceAudio': grpc.stream_stream_rpc_method_handler(
++                    servicer.EnhanceAudio,
++                    request_deserializer=studiovoice__pb2.EnhanceAudioRequest.FromString,
++                    response_serializer=studiovoice__pb2.EnhanceAudioResponse.SerializeToString,
++            ),
++    }
++    generic_handler = grpc.method_handlers_generic_handler(
++            'nvidia.ai4m.studiovoice.v1.StudioVoice', rpc_method_handlers)
++    server.add_generic_rpc_handlers((generic_handler,))
++    server.add_registered_method_handlers('nvidia.ai4m.studiovoice.v1.StudioVoice', rpc_method_handlers)
++
++
++ # This class is part of an EXPERIMENTAL API.
++class StudioVoice(object):
++    """The StudioVoice service provides APIs to run the
++    Studio Voice NIM.
++    """
++
++    @staticmethod
++    def EnhanceAudio(request_iterator,
++            target,
++            options=(),
++            channel_credentials=None,
++            call_credentials=None,
++            insecure=False,
++            compression=None,
++            wait_for_ready=None,
++            timeout=None,
++            metadata=None):
++        return grpc.experimental.stream_stream(
++            request_iterator,
++            target,
++            '/nvidia.ai4m.studiovoice.v1.StudioVoice/EnhanceAudio',
++            studiovoice__pb2.EnhanceAudioRequest.SerializeToString,
++            studiovoice__pb2.EnhanceAudioResponse.FromString,
++            options,
++            channel_credentials,
++            insecure,
++            call_credentials,
++            compression,
++            wait_for_ready,
++            timeout,
++            metadata,
++            _registered_method=True)
+diff --git a/serve/providers/nvidia_maxine.py b/serve/providers/nvidia_maxine.py
+new file mode 100644
+index 0000000..0728415
+--- /dev/null
++++ b/serve/providers/nvidia_maxine.py
+@@ -0,0 +1,224 @@
++"""Connecteur NVIDIA Maxine (BNR + Studio Voice) via NVCF gRPC.
++
++Reproduit fidèlement le client officiel NVIDIA-Maxine/nim-clients (licence MIT)
++en mode « transactionnel » (fichier complet en une requête) :
++
++    * canal TLS vers ``grpc.nvcf.nvidia.com:443`` ;
++    * métadonnées ``authorization: Bearer <clé>`` et ``function-id: <id>`` ;
++    * méthode ``EnhanceAudio`` (stream de chunks 64 KB en entrée, stream de
++      chunks WAV en sortie).
++
++Les modèles Maxine attendent du WAV (par défaut 48 kHz). On décode donc l'audio
++entrant (n'importe quel format lisible par librosa) vers le bon sample rate
++avant l'envoi, et on renvoie le WAV produit tel quel.
++
++Les ``function-id`` ne sont PAS codés en dur : ils viennent de l'environnement
++(chaque modèle a le sien, copié depuis sa page sur build.nvidia.com). Voir
++serve/NVIDIA.md.
++"""
++from __future__ import annotations
++
++import io
++import os
++import sys
++from dataclasses import dataclass
++from pathlib import Path
++
++import librosa
++import numpy as np
++import soundfile as sf
++
++# --- Rend les stubs gRPC vendorisés importables ------------------------------
++# Les fichiers générés font des imports top-level (``import bnr_pb2``), donc on
++# ajoute leurs dossiers au sys.path. Les deux protos vivent dans des packages
++# distincts (nvidia.ai4m.bnr.v1 / nvidia.ai4m.studiovoice.v1) : pas de collision.
++_VENDOR = Path(__file__).resolve().parent / "_vendor"
++for _sub in ("studio_voice", "bnr"):
++    _p = str(_VENDOR / _sub)
++    if _p not in sys.path:
++        sys.path.insert(0, _p)
++
++
++class NvidiaError(RuntimeError):
++    """Erreur générique côté NVIDIA."""
++
++
++class NvidiaAuthError(NvidiaError):
++    """Clé invalide / expirée / non autorisée (HTTP 401)."""
++
++
++class NvidiaUnavailable(NvidiaError):
++    """Dépendance gRPC absente ou configuration incomplète (HTTP 503)."""
++
++
++@dataclass(frozen=True)
++class NvidiaModel:
++    id: str               # identifiant exposé dans /models
++    label: str            # libellé UI
++    function_id_env: str  # nom de la variable d'env contenant le function-id
++    sample_rate: int      # sample rate attendu par le modèle
++    description: str
++
++
++# Registre des modèles NVIDIA branchés (les deux, choix dans l'UI).
++NVIDIA_MODELS: dict[str, NvidiaModel] = {
++    "nvidia:bnr": NvidiaModel(
++        id="nvidia:bnr",
++        label="NVIDIA · Background Noise Removal",
++        function_id_env="NVIDIA_BNR_FUNCTION_ID",
++        sample_rate=48000,
++        description="Débruitage fidèle : retire le bruit de fond, conserve la voix.",
++    ),
++    "nvidia:studiovoice": NvidiaModel(
++        id="nvidia:studiovoice",
++        label="NVIDIA · Studio Voice",
++        function_id_env="NVIDIA_STUDIOVOICE_FUNCTION_ID",
++        sample_rate=48000,
++        description="Qualité studio : débruite + dé-réverbère + restaure la voix.",
++    ),
++}
++
++_DATA_CHUNK = 64 * 1024  # 64 KB, comme le client officiel
++
++
++def is_nvidia_model(model_id: str | None) -> bool:
++    return bool(model_id) and model_id in NVIDIA_MODELS
++
++
++def list_models() -> list[dict]:
++    """Modèles NVIDIA au même format que les checkpoints locaux (pour /models)."""
++    out: list[dict] = []
++    for m in NVIDIA_MODELS.values():
++        out.append({
++            "id": m.id,
++            "label": m.label,
++            "provider": "nvidia",
++            "requires_key": True,
++            "description": m.description,
++            "configured": bool(os.environ.get(m.function_id_env, "").strip()),
++            "is_loaded": False,
++        })
++    return out
++
++
++def _grpc_target() -> str:
++    return os.environ.get("NVIDIA_GRPC_TARGET", "grpc.nvcf.nvidia.com:443").strip()
++
++
++def _grpc_timeout() -> float:
++    try:
++        return float(os.environ.get("NVIDIA_GRPC_TIMEOUT", "60"))
++    except ValueError:
++        return 60.0
++
++
++def _function_id(model: NvidiaModel) -> str:
++    fid = os.environ.get(model.function_id_env, "").strip()
++    if not fid:
++        raise NvidiaUnavailable(
++            f"function-id manquant pour {model.label} : définissez "
++            f"{model.function_id_env} (voir serve/NVIDIA.md)."
++        )
++    return fid
++
++
++def _to_wav_bytes(audio_bytes: bytes, sample_rate: int) -> bytes:
++    """Décode l'audio entrant et le ré-encode en WAV mono au sample rate cible."""
++    try:
++        wav, _ = librosa.load(io.BytesIO(audio_bytes), sr=sample_rate, mono=True)
++    except Exception as exc:  # noqa: BLE001
++        raise ValueError(f"Audio illisible : {exc}") from exc
++
++    wav = np.asarray(wav, dtype=np.float32)
++    if wav.size == 0:
++        raise ValueError("Audio vide après décodage.")
++
++    buf = io.BytesIO()
++    sf.write(buf, wav, sample_rate, format="WAV", subtype="PCM_16")
++    buf.seek(0)
++    return buf.read()
++
++
++def _request_iter(wav_bytes: bytes, pb2, intensity: float | None):
++    """Génère le flux de requêtes (config BNR optionnelle + chunks 64 KB)."""
++    if intensity is not None and hasattr(pb2, "EnhanceAudioConfig"):
++        yield pb2.EnhanceAudioRequest(
++            config=pb2.EnhanceAudioConfig(intensity_ratio=float(intensity))
++        )
++    stream = io.BytesIO(wav_bytes)
++    while True:
++        chunk = stream.read(_DATA_CHUNK)
++        if not chunk:
++            break
++        yield pb2.EnhanceAudioRequest(audio_stream_data=chunk)
++
++
++def enhance(
++    model_id: str,
++    audio_bytes: bytes,
++    api_key: str,
++    intensity: float | None = None,
++) -> bytes:
++    """Envoie l'audio au NIM Maxine et renvoie le WAV nettoyé (bytes).
++
++    Raises
++    ------
++    ValueError        : audio illisible/vide.
++    NvidiaAuthError   : clé refusée (401).
++    NvidiaUnavailable : grpc absent / function-id manquant (503).
++    NvidiaError       : autre erreur côté NVIDIA.
++    """
++    model = NVIDIA_MODELS.get(model_id)
++    if model is None:
++        raise NvidiaError(f"Modèle NVIDIA inconnu : {model_id}")
++
++    try:
++        import grpc
++    except ImportError as exc:
++        raise NvidiaUnavailable(
++            "Le paquet 'grpcio' n'est pas installé : "
++            "pip install -r requirements-serve.txt"
++        ) from exc
++
++    function_id = _function_id(model)
++    wav_bytes = _to_wav_bytes(audio_bytes, model.sample_rate)
++
++    if model_id == "nvidia:bnr":
++        import bnr_pb2 as pb2
++        import bnr_pb2_grpc as pb2_grpc
++        stub_cls = pb2_grpc.BNRStub
++    else:  # nvidia:studiovoice
++        import studiovoice_pb2 as pb2
++        import studiovoice_pb2_grpc as pb2_grpc
++        stub_cls = pb2_grpc.StudioVoiceStub
++
++    metadata = (
++        ("authorization", f"Bearer {api_key}"),
++        ("function-id", function_id),
++    )
++    credentials = grpc.ssl_channel_credentials()
++
++    try:
++        with grpc.secure_channel(_grpc_target(), credentials) as channel:
++            stub = stub_cls(channel)
++            responses = stub.EnhanceAudio(
++                _request_iter(wav_bytes, pb2, intensity),
++                metadata=metadata,
++                timeout=_grpc_timeout(),
++            )
++            out = io.BytesIO()
++            for resp in responses:
++                if resp.HasField("audio_stream_data"):
++                    out.write(resp.audio_stream_data)
++    except grpc.RpcError as exc:  # type: ignore[attr-defined]
++        code = exc.code()
++        if code in (grpc.StatusCode.UNAUTHENTICATED, grpc.StatusCode.PERMISSION_DENIED):
++            raise NvidiaAuthError("Clé NVIDIA invalide, expirée ou non autorisée.") from exc
++        if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
++            raise NvidiaError("Limite NVIDIA atteinte (rate limit / crédits épuisés).") from exc
++        raise NvidiaError(f"Erreur NVIDIA ({code.name}): {exc.details()}") from exc
++
++    data = out.getvalue()
++    if not data:
++        raise NvidiaError("Réponse vide du service NVIDIA.")
++    return data
+diff --git a/serve/quota.py b/serve/quota.py
+new file mode 100644
+index 0000000..6c21c06
+--- /dev/null
++++ b/serve/quota.py
+@@ -0,0 +1,101 @@
++"""Quota journalier par IP, stocké en SQLite.
++
++Utilisé uniquement pour le mode « clé partagée » (NVIDIA gratuit). Quand un
++utilisateur fournit sa propre clé, aucun quota n'est appliqué de notre côté
++(c'est NVIDIA qui applique le sien).
++
++Choix : SQLite plutôt que Redis/in-memory.
++    - un seul fichier, aucune dépendance à lancer ;
++    - survit aux redémarrages du serveur (contrairement à l'in-memory) ;
++    - parfait pour un serveur mono-worker (cf. INTEGRATION.md).
++
++La « remise à zéro quotidienne » est implicite : la clé primaire est
++``(day, ip)``. Un nouveau jour => une nouvelle ligne, le compteur repart de 0.
++"""
++from __future__ import annotations
++
++import os
++import sqlite3
++import threading
++from datetime import date, datetime, timezone
++from pathlib import Path
++
++# Chemin du fichier SQLite (configurable). Par défaut à la racine du repo.
++_REPO_ROOT = Path(__file__).resolve().parents[1]
++_DB_PATH = Path(os.environ.get("QUOTA_DB_PATH", _REPO_ROOT / "quota.sqlite3"))
++
++# Limite gratuite par IP et par jour (mode clé partagée). Configurable.
++def free_daily_limit() -> int:
++    try:
++        return max(0, int(os.environ.get("FREE_DAILY_LIMIT", "5")))
++    except ValueError:
++        return 5
++
++
++_lock = threading.Lock()
++_conn: sqlite3.Connection | None = None
++
++
++def _today() -> str:
++    """Jour courant en UTC (évite les sauts liés au fuseau du serveur)."""
++    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
++
++
++def _get_conn() -> sqlite3.Connection:
++    global _conn
++    if _conn is None:
++        _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
++        _conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
++        _conn.execute(
++            "CREATE TABLE IF NOT EXISTS usage ("
++            "  day   TEXT NOT NULL,"
++            "  ip    TEXT NOT NULL,"
++            "  count INTEGER NOT NULL DEFAULT 0,"
++            "  PRIMARY KEY (day, ip)"
++            ")"
++        )
++        _conn.commit()
++    return _conn
++
++
++def get_count(ip: str) -> int:
++    """Nombre d'utilisations déjà consommées par cette IP aujourd'hui."""
++    with _lock:
++        conn = _get_conn()
++        row = conn.execute(
++            "SELECT count FROM usage WHERE day = ? AND ip = ?",
++            (_today(), ip),
++        ).fetchone()
++        return int(row[0]) if row else 0
++
++
++def remaining(ip: str) -> int:
++    """Utilisations restantes aujourd'hui pour cette IP (mode gratuit)."""
++    return max(0, free_daily_limit() - get_count(ip))
++
++
++def has_quota(ip: str) -> bool:
++    return get_count(ip) < free_daily_limit()
++
++
++def increment(ip: str) -> int:
++    """Incrémente le compteur du jour pour cette IP, renvoie le nouveau total.
++
++    Fait aussi un petit ménage des lignes des jours précédents pour ne pas
++    laisser grossir la base indéfiniment.
++    """
++    with _lock:
++        conn = _get_conn()
++        day = _today()
++        conn.execute(
++            "INSERT INTO usage (day, ip, count) VALUES (?, ?, 1) "
++            "ON CONFLICT(day, ip) DO UPDATE SET count = count + 1",
++            (day, ip),
++        )
++        # Ménage : on ne garde que le jour courant.
++        conn.execute("DELETE FROM usage WHERE day <> ?", (day,))
++        conn.commit()
++        row = conn.execute(
++            "SELECT count FROM usage WHERE day = ? AND ip = ?", (day, ip)
++        ).fetchone()
++        return int(row[0]) if row else 1
+diff --git a/serve/server.py b/serve/server.py
+index 49db673..9dece12 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -32,11 +32,13 @@ from threading import RLock
+ 
+ import torch
+ from dotenv import load_dotenv
+-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
++from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import FileResponse, StreamingResponse
+ 
++from serve import keys, quota
+ from serve.inference import denoise_bytes, load_model, resolve_ckpt_path
++from serve.providers import nvidia_maxine
+ 
+ # Charge le .env à la racine du repo (CKPT_PATH, DEVICE, CORS_ORIGINS).
+ # Les variables déjà définies dans l'environnement ont priorité (override=False).
+@@ -319,16 +321,42 @@ async def health() -> dict:
+ 
+ @app.get("/models")
+ async def models() -> dict:
+-    """Liste les checkpoints disponibles pour la liste déroulante."""
+-    return {"models": _list_models()}
++    """Liste les checkpoints locaux + les modèles NVIDIA pour la liste déroulante."""
++    return {"models": _list_models() + nvidia_maxine.list_models()}
++
++
++def _request_ip(request: Request) -> str:
++    peer = request.client.host if request.client else None
++    return keys.client_ip(request.headers.get("x-forwarded-for"), peer)
++
++
++@app.get("/quota")
++async def quota_status(request: Request) -> dict:
++    """État du quota gratuit pour l'IP appelante (mode clé partagée)."""
++    ip = _request_ip(request)
++    return {
++        "limit": quota.free_daily_limit(),
++        "used": quota.get_count(ip),
++        "remaining": quota.remaining(ip),
++        "shared_key_configured": keys.shared_key() is not None,
++    }
+ 
+ 
+ @app.post("/denoise")
+ async def denoise_endpoint(
++    request: Request,
+     file: UploadFile = File(...),
+     model_id: str | None = Form(None),
++    intensity: float | None = Form(None),
++    x_api_key: str | None = Header(None, alias="X-API-Key"),
+ ) -> StreamingResponse:
+-    """Débruite le fichier audio envoyé et renvoie un WAV (16 kHz mono PCM16)."""
++    """Débruite le fichier audio envoyé et renvoie un WAV.
++
++    - Modèle local : comportement historique (16 kHz mono PCM16), sans clé.
++    - Modèle NVIDIA : nécessite une clé. Si l'utilisateur fournit la sienne via
++      l'en-tête ``X-API-Key`` -> illimité ; sinon on utilise notre clé partagée
++      avec une limite journalière par IP.
++    """
+     if file.content_type and file.content_type not in _ALLOWED_CONTENT_TYPES:
+         raise HTTPException(
+             status_code=400,
+@@ -342,6 +370,46 @@ async def denoise_endpoint(
+     if not audio_bytes:
+         raise HTTPException(status_code=400, detail="Empty file.")
+ 
++    # --- Branche NVIDIA (modèles hébergés, clé requise) ----------------------
++    if nvidia_maxine.is_nvidia_model(model_id):
++        try:
++            decision = keys.resolve_key(x_api_key)
++        except keys.InvalidUserKey as exc:
++            raise HTTPException(status_code=401, detail=str(exc))
++        except keys.NoKeyAvailable as exc:
++            raise HTTPException(status_code=503, detail=str(exc))
++
++        ip = _request_ip(request)
++        if decision.enforce_quota and not quota.has_quota(ip):
++            raise HTTPException(
++                status_code=429,
++                detail=(
++                    f"Limite gratuite atteinte ({quota.free_daily_limit()}/jour). "
++                    f"Réessayez demain, ou utilisez votre propre clé NVIDIA pour "
++                    f"un accès illimité."
++                ),
++            )
++
++        try:
++            wav_bytes = nvidia_maxine.enhance(
++                model_id, audio_bytes, decision.api_key, intensity
++            )
++        except ValueError as exc:
++            raise HTTPException(status_code=400, detail=str(exc))
++        except nvidia_maxine.NvidiaAuthError as exc:
++            raise HTTPException(status_code=401, detail=str(exc))
++        except nvidia_maxine.NvidiaUnavailable as exc:
++            raise HTTPException(status_code=503, detail=str(exc))
++        except nvidia_maxine.NvidiaError as exc:
++            raise HTTPException(status_code=502, detail=str(exc))
++
++        headers = {"Content-Disposition": 'attachment; filename="denoised.wav"'}
++        if decision.enforce_quota:
++            quota.increment(ip)  # on ne décompte qu'en cas de succès
++            headers["X-Quota-Remaining"] = str(quota.remaining(ip))
++        return StreamingResponse(iter([wav_bytes]), media_type="audio/wav", headers=headers)
++
++    # --- Branche locale (checkpoints .pt, inchangée) -------------------------
+     try:
+         model, device, input_repr, _ckpt_path = _get_model_snapshot(model_id)
+         wav_bytes = denoise_bytes(
+diff --git a/serve/test_client.html b/serve/test_client.html
+index c41fe07..b1c3d65 100644
+--- a/serve/test_client.html
++++ b/serve/test_client.html
+@@ -258,6 +258,13 @@
+       </select>
+     </div>
+ 
++    <div class="field" id="apiKeyField" style="display:none">
++      <label for="apiKey">Clé NVIDIA (optionnelle)</label>
++      <input id="apiKey" type="password" autocomplete="off"
++             placeholder="nvapi-…  — laissez vide pour le mode gratuit limité">
++      <small id="apiKeyHint" class="file-name"></small>
++    </div>
++
+     <div class="field">
+       <span class="label">Fichier audio</span>
+       <div class="file-row">
+@@ -284,6 +291,10 @@
+   <script>
+     const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:8000' : window.location.origin;
+     const modelSelect = document.getElementById('model');
++    const apiKeyField = document.getElementById('apiKeyField');
++    const apiKeyInput = document.getElementById('apiKey');
++    const apiKeyHint = document.getElementById('apiKeyHint');
++    let modelMeta = {};
+     const fileInput = document.getElementById('file');
+     const fileName = document.getElementById('fileName');
+     const runButton = document.getElementById('run');
+@@ -560,6 +571,28 @@
+       rerunButton.disabled = isBusy;
+     }
+ 
++    async function updateApiKeyVisibility() {
++      const meta = modelMeta[modelSelect.value];
++      const needsKey = !!(meta && meta.requires_key);
++      apiKeyField.style.display = needsKey ? '' : 'none';
++      if (!needsKey) {
++        apiKeyHint.textContent = '';
++        return;
++      }
++      // Modèle NVIDIA sélectionné : informer sur le quota gratuit restant.
++      try {
++        const res = await fetch(`${apiBase}/quota`);
++        if (res.ok) {
++          const q = await res.json();
++          if (!q.shared_key_configured) {
++            apiKeyHint.textContent = 'Aucune clé partagée côté serveur : votre clé est requise.';
++          } else {
++            apiKeyHint.textContent = `Mode gratuit : ${q.remaining}/${q.limit} utilisation(s) restante(s) aujourd'hui. Votre clé = illimité.`;
++          }
++        }
++      } catch (_) { /* silencieux */ }
++    }
++
+     async function loadModels() {
+       try {
+         const response = await fetch(`${apiBase}/models`);
+@@ -579,6 +612,7 @@
+         }
+ 
+         for (const model of models) {
++          modelMeta[model.id] = model;
+           const option = document.createElement('option');
+           option.value = model.id;
+           option.textContent = model.is_loaded ? `${model.label} (chargé)` : model.label;
+@@ -587,6 +621,7 @@
+             option.selected = true;
+           }
+         }
++        updateApiKeyVisibility();
+ 
+         if (!modelSelect.value) {
+           modelSelect.selectedIndex = 0;
+@@ -611,6 +646,7 @@
+     modelSelect.addEventListener('change', () => {
+       resetOutputs();
+       refreshRunState();
++      updateApiKeyVisibility();
+     });
+ 
+     downloadButton.addEventListener('click', (event) => {
+@@ -637,9 +673,14 @@
+ 
+       const startedAt = performance.now();
+       try {
++        const reqHeaders = {};
++        const apiKeyVal = (apiKeyInput.value || '').trim();
++        if (apiKeyVal) reqHeaders['X-API-Key'] = apiKeyVal;
++
+         const response = await fetch(`${apiBase}/denoise`, {
+           method: 'POST',
+           body: formData,
++          headers: reqHeaders,
+         });
+ 
+         if (!response.ok) {
+diff --git a/serve/tests/__init__.py b/serve/tests/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/serve/tests/test_nvidia_integration.py b/serve/tests/test_nvidia_integration.py
+new file mode 100644
+index 0000000..3961eaf
+--- /dev/null
++++ b/serve/tests/test_nvidia_integration.py
+@@ -0,0 +1,87 @@
++"""Test d'intégration de la couche clé+quota+NVIDIA, sans torch ni réseau.
++
++Lancer depuis la racine du repo :
++
++    python serve/tests/test_nvidia_integration.py
++
++On mocke les modules lourds (torch, librosa) et serve.inference pour pouvoir
++importer serve.server, puis on monkeypatche nvidia_maxine.enhance.
++"""
++import os
++import sys
++import types
++import tempfile
++from pathlib import Path
++
++REPO_ROOT = Path(__file__).resolve().parents[2]
++sys.path.insert(0, str(REPO_ROOT))
++
++# --- Mocks des dépendances lourdes AVANT d'importer serve.server ------------
++for name in ("torch", "librosa"):
++    mod = types.ModuleType(name)
++    if name == "torch":
++        mod.cuda = types.SimpleNamespace(is_available=lambda: False)
++    sys.modules[name] = mod
++
++fake_inf = types.ModuleType("serve.inference")
++fake_inf.denoise_bytes = lambda *a, **k: b"LOCALWAV"
++fake_inf.load_model = lambda *a, **k: (object(), "log1p", "/x/best.pt")
++fake_inf.resolve_ckpt_path = lambda p: p
++sys.modules["serve.inference"] = fake_inf
++
++# --- Environnement de test ---------------------------------------------------
++os.environ["QUOTA_DB_PATH"] = tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False).name
++os.environ["FREE_DAILY_LIMIT"] = "2"
++os.environ["NVIDIA_API_KEY"] = "nvapi-SHARED"
++os.environ["NVIDIA_BNR_FUNCTION_ID"] = "fid-bnr"
++os.environ["NVIDIA_STUDIOVOICE_FUNCTION_ID"] = "fid-sv"
++
++from fastapi.testclient import TestClient  # noqa: E402
++from serve import server, keys  # noqa: E402
++from serve.providers import nvidia_maxine  # noqa: E402
++
++client = TestClient(server.app)
++FILE = {"file": ("a.wav", b"RIFFfake", "audio/wav")}
++
++passed = []
++def check(name, cond):
++    passed.append(bool(cond))
++    print(f"[{'PASS' if cond else 'FAIL'}] {name}")
++
++r = client.get("/models")
++ids = [m["id"] for m in r.json()["models"]]
++check("/models contient les 2 modèles NVIDIA", "nvidia:bnr" in ids and "nvidia:studiovoice" in ids)
++
++q = client.get("/quota").json()
++check("/quota limite=2 + clé partagée configurée", q["limit"] == 2 and q["shared_key_configured"])
++
++calls = {"keys": []}
++nvidia_maxine.enhance = lambda mid, audio, api_key, intensity=None: (calls["keys"].append(api_key) or b"NVIDIAWAV")
++
++r1 = client.post("/denoise", data={"model_id": "nvidia:bnr"}, files=FILE)
++check("appel gratuit 1 -> 200, remaining=1", r1.status_code == 200 and r1.headers.get("x-quota-remaining") == "1")
++r2 = client.post("/denoise", data={"model_id": "nvidia:bnr"}, files=FILE)
++check("appel gratuit 2 -> 200, remaining=0", r2.status_code == 200 and r2.headers.get("x-quota-remaining") == "0")
++r3 = client.post("/denoise", data={"model_id": "nvidia:bnr"}, files=FILE)
++check("appel gratuit 3 -> 429", r3.status_code == 429)
++
++r4 = client.post("/denoise", data={"model_id": "nvidia:bnr"}, files=FILE, headers={"X-API-Key": "nvapi-USER"})
++check("clé perso -> 200 malgré quota épuisé", r4.status_code == 200 and calls["keys"][-1] == "nvapi-USER")
++
++r5 = client.post("/denoise", data={"model_id": "nvidia:bnr"}, files=FILE, headers={"X-API-Key": "pas-une-cle"})
++check("clé malformée -> 401", r5.status_code == 401)
++
++nvidia_maxine.enhance = lambda *a, **k: (_ for _ in ()).throw(nvidia_maxine.NvidiaAuthError("x"))
++r6 = client.post("/denoise", data={"model_id": "nvidia:bnr"}, files=FILE, headers={"X-API-Key": "nvapi-USER"})
++check("NvidiaAuthError -> 401", r6.status_code == 401)
++
++keys.shared_key = lambda: None
++r7 = client.post("/denoise", data={"model_id": "nvidia:studiovoice"}, files=FILE)
++check("aucune clé dispo -> 503", r7.status_code == 503)
++
++server._get_model_snapshot = lambda mid: (object(), "cpu", "log1p", "/x/best.pt")
++r8 = client.post("/denoise", data={"model_id": "local-xyz"}, files=FILE)
++check("modèle local -> 200 (pas de clé/quota)", r8.status_code == 200 and r8.content == b"LOCALWAV")
++
++print(f"\n{sum(passed)}/{len(passed)} tests OK")
++sys.exit(0 if all(passed) else 1)
+-- 
+2.43.0
+
