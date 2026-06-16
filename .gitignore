@@ -34,3 +34,6 @@ Thumbs.db
 data/processed/
 data/metadata/
 data/logs/
+# Base SQLite du quota (générée au runtime)
+quota.sqlite3
+quota.sqlite3-journal

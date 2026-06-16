@@ -32,11 +32,13 @@ from threading import RLock
 
 import torch
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 
+from serve import keys, quota
 from serve.inference import denoise_bytes, load_model, resolve_ckpt_path
+from serve.providers import nvidia_maxine
 
 # Charge le .env à la racine du repo (CKPT_PATH, DEVICE, CORS_ORIGINS).
 # Les variables déjà définies dans l'environnement ont priorité (override=False).
@@ -319,16 +321,42 @@ async def health() -> dict:
 
 @app.get("/models")
 async def models() -> dict:
-    """Liste les checkpoints disponibles pour la liste déroulante."""
-    return {"models": _list_models()}
+    """Liste les checkpoints locaux + les modèles NVIDIA pour la liste déroulante."""
+    return {"models": _list_models() + nvidia_maxine.list_models()}
+
+
+def _request_ip(request: Request) -> str:
+    peer = request.client.host if request.client else None
+    return keys.client_ip(request.headers.get("x-forwarded-for"), peer)
+
+
+@app.get("/quota")
+async def quota_status(request: Request) -> dict:
+    """État du quota gratuit pour l'IP appelante (mode clé partagée)."""
+    ip = _request_ip(request)
+    return {
+        "limit": quota.free_daily_limit(),
+        "used": quota.get_count(ip),
+        "remaining": quota.remaining(ip),
+        "shared_key_configured": keys.shared_key() is not None,
+    }
 
 
 @app.post("/denoise")
 async def denoise_endpoint(
+    request: Request,
     file: UploadFile = File(...),
     model_id: str | None = Form(None),
+    intensity: float | None = Form(None),
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
 ) -> StreamingResponse:
-    """Débruite le fichier audio envoyé et renvoie un WAV (16 kHz mono PCM16)."""
+    """Débruite le fichier audio envoyé et renvoie un WAV.
+
+    - Modèle local : comportement historique (16 kHz mono PCM16), sans clé.
+    - Modèle NVIDIA : nécessite une clé. Si l'utilisateur fournit la sienne via
+      l'en-tête ``X-API-Key`` -> illimité ; sinon on utilise notre clé partagée
+      avec une limite journalière par IP.
+    """
     if file.content_type and file.content_type not in _ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=400,
@@ -342,6 +370,46 @@ async def denoise_endpoint(
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty file.")
 
+    # --- Branche NVIDIA (modèles hébergés, clé requise) ----------------------
+    if nvidia_maxine.is_nvidia_model(model_id):
+        try:
+            decision = keys.resolve_key(x_api_key)
+        except keys.InvalidUserKey as exc:
+            raise HTTPException(status_code=401, detail=str(exc))
+        except keys.NoKeyAvailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+
+        ip = _request_ip(request)
+        if decision.enforce_quota and not quota.has_quota(ip):
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Limite gratuite atteinte ({quota.free_daily_limit()}/jour). "
+                    f"Réessayez demain, ou utilisez votre propre clé NVIDIA pour "
+                    f"un accès illimité."
+                ),
+            )
+
+        try:
+            wav_bytes = nvidia_maxine.enhance(
+                model_id, audio_bytes, decision.api_key, intensity
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except nvidia_maxine.NvidiaAuthError as exc:
+            raise HTTPException(status_code=401, detail=str(exc))
+        except nvidia_maxine.NvidiaUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        except nvidia_maxine.NvidiaError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+
+        headers = {"Content-Disposition": 'attachment; filename="denoised.wav"'}
+        if decision.enforce_quota:
+            quota.increment(ip)  # on ne décompte qu'en cas de succès
+            headers["X-Quota-Remaining"] = str(quota.remaining(ip))
+        return StreamingResponse(iter([wav_bytes]), media_type="audio/wav", headers=headers)
+
+    # --- Branche locale (checkpoints .pt, inchangée) -------------------------
     try:
         model, device, input_repr, _ckpt_path = _get_model_snapshot(model_id)
         wav_bytes = denoise_bytes(

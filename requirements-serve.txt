@@ -8,3 +8,7 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
 python-dotenv>=1.0.0
+# Modèles NVIDIA hébergés (connecteur gRPC NVCF). Optionnel si vous n'utilisez
+# que les checkpoints locaux.
+grpcio>=1.67,<1.69
+protobuf>=5.27,<6

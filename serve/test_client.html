@@ -258,6 +258,13 @@
       </select>
     </div>
 
+    <div class="field" id="apiKeyField" style="display:none">
+      <label for="apiKey">Clé NVIDIA (optionnelle)</label>
+      <input id="apiKey" type="password" autocomplete="off"
+             placeholder="nvapi-…  — laissez vide pour le mode gratuit limité">
+      <small id="apiKeyHint" class="file-name"></small>
+    </div>
+
     <div class="field">
       <span class="label">Fichier audio</span>
       <div class="file-row">
@@ -284,6 +291,10 @@
   <script>
     const apiBase = window.location.protocol === 'file:' ? 'http://127.0.0.1:8000' : window.location.origin;
     const modelSelect = document.getElementById('model');
+    const apiKeyField = document.getElementById('apiKeyField');
+    const apiKeyInput = document.getElementById('apiKey');
+    const apiKeyHint = document.getElementById('apiKeyHint');
+    let modelMeta = {};
     const fileInput = document.getElementById('file');
     const fileName = document.getElementById('fileName');
     const runButton = document.getElementById('run');
@@ -560,6 +571,28 @@
       rerunButton.disabled = isBusy;
     }
 
+    async function updateApiKeyVisibility() {
+      const meta = modelMeta[modelSelect.value];
+      const needsKey = !!(meta && meta.requires_key);
+      apiKeyField.style.display = needsKey ? '' : 'none';
+      if (!needsKey) {
+        apiKeyHint.textContent = '';
+        return;
+      }
+      // Modèle NVIDIA sélectionné : informer sur le quota gratuit restant.
+      try {
+        const res = await fetch(`${apiBase}/quota`);
+        if (res.ok) {
+          const q = await res.json();
+          if (!q.shared_key_configured) {
+            apiKeyHint.textContent = 'Aucune clé partagée côté serveur : votre clé est requise.';
+          } else {
+            apiKeyHint.textContent = `Mode gratuit : ${q.remaining}/${q.limit} utilisation(s) restante(s) aujourd'hui. Votre clé = illimité.`;
+          }
+        }
+      } catch (_) { /* silencieux */ }
+    }
+
     async function loadModels() {
       try {
         const response = await fetch(`${apiBase}/models`);
@@ -579,6 +612,7 @@
         }
 
         for (const model of models) {
+          modelMeta[model.id] = model;
           const option = document.createElement('option');
           option.value = model.id;
           option.textContent = model.is_loaded ? `${model.label} (chargé)` : model.label;
@@ -587,6 +621,7 @@
             option.selected = true;
           }
         }
+        updateApiKeyVisibility();
 
         if (!modelSelect.value) {
           modelSelect.selectedIndex = 0;
@@ -611,6 +646,7 @@
     modelSelect.addEventListener('change', () => {
       resetOutputs();
       refreshRunState();
+      updateApiKeyVisibility();
     });
 
     downloadButton.addEventListener('click', (event) => {
@@ -637,9 +673,14 @@
 
       const startedAt = performance.now();
       try {
+        const reqHeaders = {};
+        const apiKeyVal = (apiKeyInput.value || '').trim();
+        if (apiKeyVal) reqHeaders['X-API-Key'] = apiKeyVal;
+
         const response = await fetch(`${apiBase}/denoise`, {
           method: 'POST',
           body: formData,
+          headers: reqHeaders,
         });
 
         if (!response.ok) {
