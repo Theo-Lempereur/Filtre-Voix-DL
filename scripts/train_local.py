@@ -81,6 +81,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-workers", type=int, default=None)
     p.add_argument("--base-channels", type=int, default=None)
     p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--output-mode", choices=["mask", "complex"], default=None,
+                   help="'mask' = recette p2 (masque magnitude). 'complex' = "
+                        "complex spectral mapping (prédit Re/Im, récupère la phase, "
+                        "dépasse le plafond +12 dB).")
+    p.add_argument("--csm-compress", type=float, default=None,
+                   help="Compression puissance des spectres en mode complex (défaut 0.3).")
 
     # Sous-échantillonnage (pour smoke tests).
     p.add_argument("--max-train-samples", type=int, default=None)
@@ -91,6 +97,34 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="Désactive wandb (utile en local sans clé API).")
     p.add_argument("--force", action="store_true",
                    help="Force l'acquisition du lock même si un autre run semble vivant.")
+
+    # --- Performance (activées par défaut sur CUDA ; ces flags les désactivent) ---
+    p.add_argument("--no-amp", action="store_true",
+                   help="Désactive la mixed precision bf16 (activée par défaut sur CUDA).")
+    p.add_argument("--compile", action="store_true",
+                   help="Active torch.compile (Linux/RunPod ; nécessite Triton, "
+                        "sinon fallback eager). Désactivé par défaut (Windows = pas de Triton).")
+    p.add_argument("--no-cache", action="store_true",
+                   help="Lit les WAV directement au lieu du cache memmap "
+                        "(cache activé par défaut ; voir scripts/build_wav_cache.py).")
+    p.add_argument("--cache-dir", default=None,
+                   help="Dossier du cache memmap (défaut : src.config.CACHE_DIR, "
+                        "surchargeable aussi par la variable FILTRE_VOIX_DL_CACHE). "
+                        "Utile sur RunPod pour pointer le Network Volume.")
+
+    # --- Recette p2 : poids des composantes loss + warmup + weight decay ---
+    # Les autres choix de la recette (log1p, GroupNorm, AdamW, masque sigmoid)
+    # sont figés dans le code et ne sont plus exposés en CLI.
+    p.add_argument("--loss-w-mse",    type=float, default=None,
+                   help="Poids MSE dans la loss combinée (0 par défaut).")
+    p.add_argument("--loss-w-l1comp", type=float, default=None,
+                   help="Poids L1(mag^0.3) dans la loss combinée (1.0 par défaut).")
+    p.add_argument("--loss-w-mrstft", type=float, default=None,
+                   help="Poids MR-STFT dans la loss combinée (1.0 par défaut).")
+    p.add_argument("--weight-decay", type=float, default=None,
+                   help="Weight decay AdamW (1e-4 par défaut).")
+    p.add_argument("--lr-warmup-epochs", type=int, default=None,
+                   help="Nb d'epochs de warmup linéaire du LR (2 par défaut, 0 = désactivé).")
     return p
 
 
@@ -116,13 +150,42 @@ def _build_config(args: argparse.Namespace) -> dict:
     if args.num_workers is not None:   config["num_workers"]   = args.num_workers
     if args.base_channels is not None: config["base_channels"] = args.base_channels
     if args.seed is not None:          config["seed"]          = args.seed
+    if args.output_mode is not None:   config["output_mode"]   = args.output_mode
+    if args.csm_compress is not None:  config["csm_compress"]  = args.csm_compress
     if args.no_wandb:                  config["use_wandb"]     = False
+    if args.no_amp:                    config["amp"]           = False
+    if args.compile:                   config["compile"]       = True
+    if args.no_cache:                  config["use_wav_cache"] = False
+    if args.cache_dir is not None:     config["cache_dir"]     = args.cache_dir
+
+    # --- Overrides recette p2 (loss weights + warmup + weight_decay) ---
+    # Fusionne les --loss-w-* dans le dict loss_weights (override partiel).
+    weight_overrides = {}
+    if args.loss_w_mse    is not None: weight_overrides["mse"]     = args.loss_w_mse
+    if args.loss_w_l1comp is not None: weight_overrides["l1_comp"] = args.loss_w_l1comp
+    if args.loss_w_mrstft is not None: weight_overrides["mr_stft"] = args.loss_w_mrstft
+    if weight_overrides:
+        base_weights = dict(config.get("loss_weights", {}))
+        base_weights.update(weight_overrides)
+        config["loss_weights"] = base_weights
+    if args.weight_decay is not None:     config["weight_decay"]     = args.weight_decay
+    if args.lr_warmup_epochs is not None: config["lr_warmup_epochs"] = args.lr_warmup_epochs
 
     return config
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+
+    # 0. Force l'encodage UTF-8 sur stdout/stderr. Sans ça, un lancement CLI
+    # direct sur une console Windows (cp1252) plante à l'affichage des
+    # caractères non-ASCII (ex: ★ dans les résumés d'epoch). La GUI passe déjà
+    # PYTHONIOENCODING=utf-8 ; on couvre ici le cas du lancement manuel.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
 
     # 1. Vérifie l'accès à la racine Drive (échec clair si Drive Desktop manque).
     cfg.ensure_project_root()

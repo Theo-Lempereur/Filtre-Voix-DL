@@ -9,6 +9,7 @@ import numpy as np
 import librosa
 import librosa.display
 import matplotlib.pyplot as plt
+import torch
 
 from . import config
 
@@ -77,6 +78,30 @@ def istft(spec: np.ndarray,
 def magnitude_phase(spec_complex: np.ndarray):
     """Sépare un spectre complexe en (magnitude, phase)."""
     return np.abs(spec_complex), np.angle(spec_complex)
+
+
+def stft_torch(wav: torch.Tensor,
+               n_fft: int = config.N_FFT,
+               hop_length: int = config.HOP_LENGTH,
+               win_length: int = config.WIN_LENGTH) -> tuple[torch.Tensor, torch.Tensor]:
+    """STFT batchée sur le device de `wav` (typiquement GPU).
+
+    Équivalent torch de `stft` + `magnitude_phase` (librosa) : fenêtre de Hann,
+    ``center=True``, mêmes ``n_fft / hop_length / win_length``. C'est la **source
+    de vérité unique** de la STFT à l'entraînement — la STFT n'est plus calculée
+    côté CPU dans le DataLoader.
+
+    Args:
+        wav : tenseur réel (..., T) — par ex. (B, samples).
+    Returns:
+        (magnitude, phase), chacun de shape (..., F, frames) avec F = n_fft//2 + 1.
+    """
+    window = torch.hann_window(win_length, device=wav.device, dtype=wav.dtype)
+    spec = torch.stft(
+        wav, n_fft=n_fft, hop_length=hop_length, win_length=win_length,
+        window=window, center=True, pad_mode="constant", return_complex=True,
+    )
+    return spec.abs(), torch.angle(spec)
 
 
 def reconstruct(magnitude: np.ndarray, phase: np.ndarray,

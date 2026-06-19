@@ -1,0 +1,184 @@
+[train_local] log : /workspace/runs/logs/rp_5090_bc48_bs40.log
+[train_local] racine projet : /workspace/runs
+[train] device=cuda | run_id=rp_5090_bc48_bs40
+[train] cache waveforms : /workspace/cache
+[train] batches : train=1597  val=200
+[train] torch.compile activé (fallback eager si backend indisponible).
+[34m[1mwandb[0m: [wandb.login()] Loaded credentials for https://api.wandb.ai from /root/.netrc.
+[34m[1mwandb[0m: Currently logged in as: [33mtheo-lempereur[0m ([33mtheo-lempereur-junia[0m) to [32mhttps://api.wandb.ai[0m. Use [1m`wandb login --relogin`[0m to force relogin
+[34m[1mwandb[0m: Waiting for wandb.init()...
+[Am[2K[34m[1mwandb[0m: Waiting for wandb.init()...
+[Am[2K[34m[1mwandb[0m: Waiting for wandb.init()...
+[Am[2K[34m[1mwandb[0m: Waiting for wandb.init()...
+[Am[2K[34m[1mwandb[0m: setting up run rp_5090_bc48_bs40 (0.5s)
+[Am[2K[34m[1mwandb[0m: Tracking run with wandb version 0.26.1
+[34m[1mwandb[0m: Run data is saved locally in [35m[1m/workspace/Filtre-Voix-DL/wandb/run-20260604_185113-rp_5090_bc48_bs40[0m
+[34m[1mwandb[0m: Run [1m`wandb offline`[0m to turn off syncing.
+[34m[1mwandb[0m: Syncing run [33mrp_5090_bc48_bs40[0m
+[34m[1mwandb[0m:  View project at [34m[4mhttps://wandb.ai/theo-lempereur-junia/filtre-voix-dl[0m
+[34m[1mwandb[0m:  View run at [34m[4mhttps://wandb.ai/theo-lempereur-junia/filtre-voix-dl/runs/rp_5090_bc48_bs40[0m
+  ep   1 | train 0.9156  val 0.8065  SI-SDR +17.01 dB  SI-SDRi +8.49 dB  (noisy +8.52)  plat L0/S0  lr 1.10e-04  (486.4s) ★ both
+  ep   2 | train 0.7766  val 0.7926  SI-SDR +17.70 dB  SI-SDRi +9.18 dB  (noisy +8.52)  plat L0/S0  lr 2.00e-04  (363.6s) ★ both
+  ep   3 | train 0.7588  val 0.7511  SI-SDR +18.07 dB  SI-SDRi +9.54 dB  (noisy +8.52)  plat L0/S0  lr 2.00e-04  (362.8s) ★ both
+  ep   4 | train 0.7263  val 0.7307  SI-SDR +18.19 dB  SI-SDRi +9.67 dB  (noisy +8.52)  plat L0/S0  lr 2.00e-04  (363.8s) ★ both
+  ep   5 | train 0.7073  val 0.7341  SI-SDR +18.36 dB  SI-SDRi +9.84 dB  (noisy +8.52)  plat L1/S0  lr 2.00e-04  (363.5s) ★ sdri
+  ep   6 | train 0.6963  val 0.7098  SI-SDR +18.08 dB  SI-SDRi +9.56 dB  (noisy +8.52)  plat L0/S1  lr 2.00e-04  (363.6s) ★ loss
+  ep   7 | train 0.6889  val 0.7228  SI-SDR +18.42 dB  SI-SDRi +9.90 dB  (noisy +8.52)  plat L1/S0  lr 2.00e-04  (364.7s) ★ sdri
+  ep   8 | train 0.6820  val 0.6996  SI-SDR +19.12 dB  SI-SDRi +10.59 dB  (noisy +8.52)  plat L0/S0  lr 2.00e-04  (364.7s) ★ both
+  ep   9 | train 0.6753  val 0.6931  SI-SDR +19.03 dB  SI-SDRi +10.51 dB  (noisy +8.52)  plat L0/S1  lr 2.00e-04  (363.3s) ★ loss
+  ep  10 | train 0.6708  val 0.6883  SI-SDR +19.11 dB  SI-SDRi +10.59 dB  (noisy +8.52)  plat L0/S2  lr 2.00e-04  (363.2s) ★ loss
+  ep  11 | train 0.6655  val 0.7018  SI-SDR +19.35 dB  SI-SDRi +10.83 dB  (noisy +8.52)  plat L1/S0  lr 2.00e-04  (363.6s) ★ sdri
+  ep  12 | train 0.6613  val 0.6852  SI-SDR +19.35 dB  SI-SDRi +10.82 dB  (noisy +8.52)  plat L0/S1  lr 2.00e-04  (365.0s) ★ loss
+  ep  13 | train 0.6567  val 0.6848  SI-SDR +19.14 dB  SI-SDRi +10.62 dB  (noisy +8.52)  plat L0/S2  lr 2.00e-04  (364.0s) ★ loss
+  ep  14 | train 0.6524  val 0.6856  SI-SDR +19.32 dB  SI-SDRi +10.79 dB  (noisy +8.52)  plat L1/S3  lr 2.00e-04  (366.0s)
+  ep  15 | train 0.6495  val 0.6878  SI-SDR +18.99 dB  SI-SDRi +10.47 dB  (noisy +8.52)  plat L2/S4  lr 2.00e-04  (363.9s)
+  ep  16 | train 0.6455  val 0.6787  SI-SDR +19.30 dB  SI-SDRi +10.78 dB  (noisy +8.52)  plat L0/S5  lr 2.00e-04  (364.3s) ★ loss
+  ep  17 | train 0.6427  val 0.6765  SI-SDR +19.46 dB  SI-SDRi +10.94 dB  (noisy +8.52)  plat L0/S0  lr 2.00e-04  (362.8s) ★ both
+  ep  18 | train 0.6383  val 0.6777  SI-SDR +19.64 dB  SI-SDRi +11.11 dB  (noisy +8.52)  plat L1/S0  lr 2.00e-04  (362.7s) ★ sdri
+  ep  19 | train 0.6350  val 0.6780  SI-SDR +19.06 dB  SI-SDRi +10.54 dB  (noisy +8.52)  plat L2/S1  lr 2.00e-04  (362.6s)
+  ep  20 | train 0.6323  val 0.6760  SI-SDR +19.67 dB  SI-SDRi +11.15 dB  (noisy +8.52)  plat L0/S0  lr 2.00e-04  (365.9s) ★ both
+  ep  21 | train 0.6289  val 0.6746  SI-SDR +19.50 dB  SI-SDRi +10.98 dB  (noisy +8.52)  plat L0/S1  lr 2.00e-04  (363.9s) ★ loss
+  ep  22 | train 0.6261  val 0.6744  SI-SDR +19.75 dB  SI-SDRi +11.23 dB  (noisy +8.52)  plat L0/S0  lr 2.00e-04  (362.4s) ★ both
+  ep  23 | train 0.6235  val 0.6743  SI-SDR +19.40 dB  SI-SDRi +10.88 dB  (noisy +8.52)  plat L1/S1  lr 2.00e-04  (362.9s) ★ loss
+  ep  24 | train 0.6213  val 0.6737  SI-SDR +19.63 dB  SI-SDRi +11.11 dB  (noisy +8.52)  plat L0/S2  lr 2.00e-04  (362.0s) ★ loss
+  ep  25 | train 0.6184  val 0.6734  SI-SDR +19.67 dB  SI-SDRi +11.14 dB  (noisy +8.52)  plat L0/S3  lr 2.00e-04  (362.7s) ★ loss
+  ep  26 | train 0.6158  val 0.6735  SI-SDR +19.60 dB  SI-SDRi +11.08 dB  (noisy +8.52)  plat L1/S4  lr 2.00e-04  (363.0s)
+  ep  27 | train 0.6137  val 0.6727  SI-SDR +19.66 dB  SI-SDRi +11.14 dB  (noisy +8.52)  plat L0/S5  lr 2.00e-04  (362.5s) ★ loss
+  ep  28 | train 0.6117  val 0.6767  SI-SDR +19.60 dB  SI-SDRi +11.08 dB  (noisy +8.52)  plat L1/S6  lr 2.00e-04  (363.3s)
+  ep  29 | train 0.6094  val 0.6773  SI-SDR +19.45 dB  SI-SDRi +10.93 dB  (noisy +8.52)  plat L2/S7  lr 2.00e-04  (362.5s)
+  ep  30 | train 0.6080  val 0.6753  SI-SDR +19.72 dB  SI-SDRi +11.19 dB  (noisy +8.52)  plat L3/S8  lr 1.00e-04  (362.4s)
+  ep  31 | train 0.5993  val 0.6722  SI-SDR +19.80 dB  SI-SDRi +11.27 dB  (noisy +8.52)  plat L0/S0  lr 1.00e-04  (363.5s) ★ both
+  ep  32 | train 0.5975  val 0.6734  SI-SDR +19.78 dB  SI-SDRi +11.26 dB  (noisy +8.52)  plat L1/S1  lr 1.00e-04  (363.5s)
+  ep  33 | train 0.5956  val 0.6738  SI-SDR +19.76 dB  SI-SDRi +11.23 dB  (noisy +8.52)  plat L2/S2  lr 1.00e-04  (362.5s)
+  ep  34 | train 0.5941  val 0.6740  SI-SDR +19.82 dB  SI-SDRi +11.30 dB  (noisy +8.52)  plat L3/S0  lr 1.00e-04  (368.5s) ★ sdri
+  ep  35 | train 0.5928  val 0.6745  SI-SDR +19.80 dB  SI-SDRi +11.28 dB  (noisy +8.52)  plat L4/S1  lr 1.00e-04  (364.1s)
+  ep  36 | train 0.5914  val 0.6749  SI-SDR +19.90 dB  SI-SDRi +11.38 dB  (noisy +8.52)  plat L5/S0  lr 1.00e-04  (364.1s) ★ sdri
+  ep  37 | train 0.5904  val 0.6754  SI-SDR +19.77 dB  SI-SDRi +11.24 dB  (noisy +8.52)  plat L6/S1  lr 1.00e-04  (361.5s)
+[34m[1mwandb[0m: Finishing up...
+[Am[2K[34m[1mwandb[0m: Finishing up...
+[Am[2K[34m[1mwandb[0m: Finishing up...
+[Am[2K[34m[1mwandb[0m: Finishing up...
+[Am[2K[34m[1mwandb[0m: updating run metadata (0.4s)
+[Am[2K[34m[1mwandb[0m: updating run metadata (0.4s)
+[Am[2K[34m[1mwandb[0m: updating run metadata (0.4s)
+[Am[2K[34m[1mwandb[0m: updating run metadata (0.4s)
+[Am[2K[34m[1mwandb[0m: updating run metadata (0.4s)
+[Am[2K[34m[1mwandb[0m: uploading output.log 4.7KB/4.7KB (0.3s)
+[34m[1mwandb[0m: uploading wandb-summary.json 843B/843B (0.3s)
+[34m[1mwandb[0m: uploading config.yaml 3.5KB/3.5KB (0.2s)
+[Am[2K[Am[2K[Am[2K[34m[1mwandb[0m: uploading output.log 4.7KB/4.7KB (0.3s)
+[34m[1mwandb[0m: uploading wandb-summary.json 843B/843B (0.3s)
+[34m[1mwandb[0m: uploading config.yaml 3.5KB/3.5KB (0.2s)
+[Am[2K[Am[2K[Am[2K[34m[1mwandb[0m: uploading output.log 4.7KB/4.7KB (0.3s)
+[34m[1mwandb[0m: uploading wandb-summary.json 843B/843B (0.3s)
+[34m[1mwandb[0m: uploading config.yaml 3.5KB/3.5KB (0.2s)
+[Am[2K[Am[2K[Am[2K[34m[1mwandb[0m: uploading output.log 4.7KB/4.7KB (0.3s)
+[34m[1mwandb[0m: uploading wandb-summary.json 843B/843B (0.3s)
+[34m[1mwandb[0m: uploading config.yaml 3.5KB/3.5KB (0.2s)
+[Am[2K[Am[2K[Am[2K[34m[1mwandb[0m: uploading output.log 4.7KB/4.7KB (0.3s)
+[34m[1mwandb[0m: uploading wandb-summary.json 843B/843B (0.3s)
+[34m[1mwandb[0m: uploading config.yaml 3.5KB/3.5KB (0.2s)
+[Am[2K[Am[2K[Am[2K[34m[1mwandb[0m: 
+[34m[1mwandb[0m: Run summary:
+[34m[1mwandb[0m:    best_val_loss 0.6722
+[34m[1mwandb[0m: best_val_si_sdri 11.38207
+[34m[1mwandb[0m:        diverging True
+[34m[1mwandb[0m:            epoch 38
+[34m[1mwandb[0m:    epoch_seconds 361.46909
+[34m[1mwandb[0m:              gap 0.08342
+[34m[1mwandb[0m:        gap_ratio 1.14102
+[34m[1mwandb[0m:      global_step 59539
+[34m[1mwandb[0m:     is_best_loss False
+[34m[1mwandb[0m:     is_best_sdri False
+[34m[1mwandb[0m:              +17 ...
+[34m[1mwandb[0m: 
+[34m[1mwandb[0m:  View run [33mrp_5090_bc48_bs40[0m at: [34m[4mhttps://wandb.ai/theo-lempereur-junia/filtre-voix-dl/runs/rp_5090_bc48_bs40[0m
+[34m[1mwandb[0m:  View project at: [34m[4mhttps://wandb.ai/theo-lempereur-junia/filtre-voix-dl[0m
+[34m[1mwandb[0m: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+[34m[1mwandb[0m: Find logs at: [35m[1m./wandb/run-20260604_185113-rp_5090_bc48_bs40/logs[0m
+Traceback (most recent call last):
+  File "/workspace/Filtre-Voix-DL/scripts/train_local.py", line 211, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/workspace/Filtre-Voix-DL/scripts/train_local.py", line 197, in main
+    train(
+  File "/workspace/Filtre-Voix-DL/src/train.py", line 497, in train
+    return _train_locked(
+           ^^^^^^^^^^^^^^
+  File "/workspace/Filtre-Voix-DL/src/train.py", line 674, in _train_locked
+    train_loss, global_step = _train_one_epoch(
+                              ^^^^^^^^^^^^^^^^^
+  File "/workspace/Filtre-Voix-DL/src/train.py", line 325, in _train_one_epoch
+    loss_val = float(loss.item())
+                     ^^^^^^^^^^^
+KeyboardInterrupt
+[train_local] log : /workspace/runs/logs/rp_5090_bc48_bs40.log
+[train_local] racine projet : /workspace/runs
+[train] config restaurée à l'identique depuis le checkpoint.
+[train] device=cuda | run_id=rp_5090_bc48_bs40
+[train] cache waveforms : /workspace/cache
+[train] batches : train=1597  val=200
+[train] torch.compile activé (fallback eager si backend indisponible).
+[train] reprise depuis /workspace/runs/checkpoints/rp_5090_bc48_bs40/last.pt (epoch terminée = 37, best_val = 0.672204)
+[34m[1mwandb[0m: [wandb.login()] Loaded credentials for https://api.wandb.ai from /root/.netrc.
+[34m[1mwandb[0m: Currently logged in as: [33mtheo-lempereur[0m ([33mtheo-lempereur-junia[0m) to [32mhttps://api.wandb.ai[0m. Use [1m`wandb login --relogin`[0m to force relogin
+[34m[1mwandb[0m: Waiting for wandb.init()...
+[Am[2K[34m[1mwandb[0m: Waiting for wandb.init()...
+[Am[2K[34m[1mwandb[0m: Waiting for wandb.init()...
+[Am[2K[34m[1mwandb[0m: Waiting for wandb.init()...
+[Am[2K[34m[1mwandb[0m: Tracking run with wandb version 0.26.1
+[34m[1mwandb[0m: Run data is saved locally in [35m[1m/workspace/Filtre-Voix-DL/wandb/run-20260604_224308-rp_5090_bc48_bs40[0m
+[34m[1mwandb[0m: Run [1m`wandb offline`[0m to turn off syncing.
+[34m[1mwandb[0m: Resuming run [33mrp_5090_bc48_bs40[0m
+[34m[1mwandb[0m:  View project at [34m[4mhttps://wandb.ai/theo-lempereur-junia/filtre-voix-dl[0m
+[34m[1mwandb[0m:  View run at [34m[4mhttps://wandb.ai/theo-lempereur-junia/filtre-voix-dl/runs/rp_5090_bc48_bs40[0m
+[34m[1mwandb[0m: [33mWARNING[0m Tried to log to step 38 that is less than the current step 39. Steps must be monotonically increasing, so this data will be ignored. See https://wandb.me/define-metric to log data out of order.
+  ep  38 | train 0.5888  val 0.6761  SI-SDR +20.00 dB  SI-SDRi +11.48 dB  (noisy +8.52)  plat L7/S0  lr 1.00e-04  (405.1s) ★ sdri
+  ep  39 | train 0.5883  val 0.6767  SI-SDR +19.84 dB  SI-SDRi +11.32 dB  (noisy +8.52)  plat L8/S1  lr 1.00e-04  (363.0s)
+  ep  40 | train 0.5869  val 0.6770  SI-SDR +19.79 dB  SI-SDRi +11.26 dB  (noisy +8.52)  plat L9/S2  lr 1.00e-04  (363.0s)
+  ep  41 | train 0.5863  val 0.6763  SI-SDR +19.80 dB  SI-SDRi +11.28 dB  (noisy +8.52)  plat L10/S3  lr 5.00e-05  (363.0s)
+  ep  42 | train 0.5820  val 0.6767  SI-SDR +19.77 dB  SI-SDRi +11.25 dB  (noisy +8.52)  plat L11/S4  lr 5.00e-05  (362.7s)
+  ep  43 | train 0.5810  val 0.6768  SI-SDR +19.82 dB  SI-SDRi +11.30 dB  (noisy +8.52)  plat L12/S5  lr 5.00e-05  (362.7s)
+[train] stop demandé via flag, sauvegarde de last.pt puis exit.
+[34m[1mwandb[0m: updating run metadata (0.0s)
+[Am[2K[34m[1mwandb[0m: updating run metadata (0.0s)
+[Am[2K[34m[1mwandb[0m: updating run metadata (0.0s)
+[Am[2K[34m[1mwandb[0m: updating run metadata (0.0s)
+[Am[2K[34m[1mwandb[0m: Finishing up...
+[Am[2K[34m[1mwandb[0m: Finishing up...
+[Am[2K[34m[1mwandb[0m: Finishing up...
+[Am[2K[34m[1mwandb[0m: Finishing up...
+[Am[2K[34m[1mwandb[0m: Finishing up...
+[Am[2K[34m[1mwandb[0m: uploading output.log 1.0KB/1.0KB (0.5s)
+[34m[1mwandb[0m: uploading wandb-summary.json 842B/842B (0.5s)
+[Am[2K[Am[2K[34m[1mwandb[0m: uploading output.log 1.0KB/1.0KB (0.5s)
+[34m[1mwandb[0m: uploading wandb-summary.json 842B/842B (0.5s)
+[Am[2K[Am[2K[34m[1mwandb[0m: uploading output.log 1.0KB/1.0KB (0.5s)
+[34m[1mwandb[0m: uploading wandb-summary.json 842B/842B (0.5s)
+[Am[2K[Am[2K[34m[1mwandb[0m: uploading output.log 1.0KB/1.0KB (0.5s)
+[34m[1mwandb[0m: uploading wandb-summary.json 842B/842B (0.5s)
+[Am[2K[Am[2K[34m[1mwandb[0m: uploading output.log 1.0KB/1.0KB (0.5s)
+[34m[1mwandb[0m: uploading wandb-summary.json 842B/842B (0.5s)
+[Am[2K[Am[2K[34m[1mwandb[0m: uploading history steps 43-43, summary, console lines 7-7 (0.2s)
+[Am[2K[34m[1mwandb[0m: uploading history steps 43-43, summary, console lines 7-7 (0.2s)
+[Am[2K[34m[1mwandb[0m: uploading history steps 43-43, summary, console lines 7-7 (0.2s)
+[Am[2K[34m[1mwandb[0m: uploading history steps 43-43, summary, console lines 7-7 (0.2s)
+[Am[2K[34m[1mwandb[0m: 
+[34m[1mwandb[0m: Run summary:
+[34m[1mwandb[0m:    best_val_loss 0.6722
+[34m[1mwandb[0m: best_val_si_sdri 11.48229
+[34m[1mwandb[0m:        diverging True
+[34m[1mwandb[0m:            epoch 44
+[34m[1mwandb[0m:    epoch_seconds 362.66549
+[34m[1mwandb[0m:              gap 0.09348
+[34m[1mwandb[0m:        gap_ratio 1.16032
+[34m[1mwandb[0m:      global_step 68771
+[34m[1mwandb[0m:     is_best_loss False
+[34m[1mwandb[0m:     is_best_sdri False
+[34m[1mwandb[0m:              +17 ...
+[34m[1mwandb[0m: 
+[34m[1mwandb[0m:  View run [33mrp_5090_bc48_bs40[0m at: [34m[4mhttps://wandb.ai/theo-lempereur-junia/filtre-voix-dl/runs/rp_5090_bc48_bs40[0m
+[34m[1mwandb[0m:  View project at: [34m[4mhttps://wandb.ai/theo-lempereur-junia/filtre-voix-dl[0m
+[34m[1mwandb[0m: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+[34m[1mwandb[0m: Find logs at: [35m[1m./wandb/run-20260604_224308-rp_5090_bc48_bs40/logs[0m
+[train] arrêté à la demande de l'utilisateur. ckpt_dir=/workspace/runs/checkpoints/rp_5090_bc48_bs40

@@ -11,11 +11,16 @@ Trois familles :
    rapides ; le SI-SDR strict sur waveform sera dans `evaluate.py` (semaine 3).
 3. **OverfitMonitor** — accumule (train_loss, val_loss) au fil des epochs et
    en déduit des drapeaux interprétables + un signal d'early stopping.
+
+Factory `build_loss(config)` (cf. bas du module) : retourne une closure qui
+combine `MSE`, `L1(mag^0.3)` et `MR-STFT` selon `LOSS_WEIGHTS`. La closure
+accepte un dict `batch` (clés : pred_mag, clean_mag, pred_wav, clean_wav)
+et retourne un scalaire torch.
 """
 from __future__ import annotations
 
 from collections import deque
-from typing import Iterable
+from typing import Any, Callable, Iterable
 
 import torch
 import torch.nn.functional as F
@@ -32,6 +37,111 @@ def magnitude_mse_loss(pred_mag: torch.Tensor, clean_mag: torch.Tensor) -> torch
     Sortie : scalaire torch (moyennée sur tous les éléments du batch).
     """
     return F.mse_loss(pred_mag, clean_mag)
+
+
+def l1_compressed_loss(pred_mag: torch.Tensor, clean_mag: torch.Tensor,
+                       power: float = 0.3, eps: float = 1e-6) -> torch.Tensor:
+    """L1 sur magnitude compressée par `mag^power`.
+
+    La MSE/L1 sur magnitude linéaire est dominée par les bins haute énergie
+    (basses fréquences voisées). Compresser par `^0.3` (proche de la loi
+    psychoacoustique de Stevens pour la sonie) ramène les bins faibles dans
+    le budget de gradient → le réseau apprend à effacer le bruit résiduel
+    basse-énergie qu'on entend pourtant.
+
+    pred_mag, clean_mag : (B, 1, F, T), valeurs >= 0.
+    Sortie : scalaire torch.
+    """
+    # La dérivée de x^p (p<1) tend vers l'infini en x=0. Un simple clamp(min=0)
+    # ne suffit PAS : il laisse passer x=0 exact (cas réel quand un bin de
+    # magnitude est nul — ex. frame de silence, accentué par le cache float16),
+    # et le backward produit alors un gradient inf -> NaN. On ajoute donc un
+    # plancher eps à la base pour garantir une dérivée finie partout.
+    pred_c  = (torch.clamp(pred_mag,  min=0.0) + eps).pow(power)
+    clean_c = (torch.clamp(clean_mag, min=0.0) + eps).pow(power)
+    return F.l1_loss(pred_c, clean_c)
+
+
+def mr_stft_loss(pred_wav: torch.Tensor, clean_wav: torch.Tensor,
+                 fft_sizes: Iterable[int] = (256, 512, 1024),
+                 eps: float = 1e-7) -> torch.Tensor:
+    """Multi-Resolution STFT loss : moyenne L1 de log-magnitudes sur plusieurs n_fft.
+
+    Standard moderne en débruitage / vocoding (Yamamoto et al., Yang et al.).
+    En sommant des STFT à différentes résolutions, on capture à la fois la
+    structure fine fréquentielle (n_fft grand) et la structure temporelle
+    rapide (n_fft petit). Cible directement les artefacts spectraux audibles.
+
+    pred_wav, clean_wav : (B, T) ou (B, 1, T) — waveform.
+    Sortie : scalaire torch.
+    """
+    if pred_wav.dim() == 3:
+        pred_wav = pred_wav.squeeze(1)
+    if clean_wav.dim() == 3:
+        clean_wav = clean_wav.squeeze(1)
+
+    total = pred_wav.new_zeros(())
+    n_scales = 0
+    for n_fft in fft_sizes:
+        hop = max(n_fft // 4, 1)
+        window = torch.hann_window(n_fft, device=pred_wav.device, dtype=pred_wav.dtype)
+        # return_complex=True : moderne et sans warning depuis torch >= 1.8.
+        pred_spec  = torch.stft(pred_wav,  n_fft=n_fft, hop_length=hop,
+                                window=window, return_complex=True)
+        clean_spec = torch.stft(clean_wav, n_fft=n_fft, hop_length=hop,
+                                window=window, return_complex=True)
+        pred_mag   = pred_spec.abs()
+        clean_mag  = clean_spec.abs()
+        # log-magnitude pour cibler aussi les composantes faibles
+        l_log = F.l1_loss(torch.log(pred_mag + eps), torch.log(clean_mag + eps))
+        # convergence (magnitude L1) — composante standard de MR-STFT
+        l_mag = F.l1_loss(pred_mag, clean_mag)
+        total = total + l_log + l_mag
+        n_scales += 1
+    return total / max(n_scales, 1)
+
+
+def complex_spectral_loss(pred_ri: torch.Tensor, clean_ri: torch.Tensor,
+                          eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
+    """Loss du complex spectral mapping : composantes Re/Im + magnitude.
+
+    pred_ri, clean_ri : (B, 2, F, T) — réel (canal 0) et imaginaire (canal 1)
+    du spectre **compressé** (|S|^c · e^{jθ}).
+
+    Retourne (l_ri, l_mag) :
+      - l_ri  = L1(Re) + L1(Im)            → contraint phase + amplitude conjointement
+      - l_mag = L1(|·|) sur magnitude       → terme stabilisant (Tan & Wang) :
+                empêche le réseau de sacrifier la magnitude pour la phase.
+    """
+    l_ri = F.l1_loss(pred_ri[:, 0], clean_ri[:, 0]) + F.l1_loss(pred_ri[:, 1], clean_ri[:, 1])
+    pred_mag  = torch.sqrt(pred_ri[:, 0] ** 2 + pred_ri[:, 1] ** 2 + eps)
+    clean_mag = torch.sqrt(clean_ri[:, 0] ** 2 + clean_ri[:, 1] ** 2 + eps)
+    l_mag = F.l1_loss(pred_mag, clean_mag)
+    return l_ri, l_mag
+
+
+def si_sdr_wav(pred_wav: torch.Tensor, clean_wav: torch.Tensor,
+               eps: float = 1e-8) -> torch.Tensor:
+    """SI-SDR (en dB) sur signal temporel — métrique de validation.
+
+    Contrairement à `si_sdr_mag`, calcule la VRAIE SI-SDR sur waveform. Loggué
+    en validation quand `pred_wav` est disponible (i.e. dès que la loss
+    MR-STFT est active, l'ISTFT est déjà calculée).
+    """
+    if pred_wav.dim() == 3:
+        pred_wav = pred_wav.squeeze(1)
+    if clean_wav.dim() == 3:
+        clean_wav = clean_wav.squeeze(1)
+    B = pred_wav.shape[0]
+    pred   = pred_wav.reshape(B, -1)
+    target = clean_wav.reshape(B, -1)
+    dot           = (pred * target).sum(dim=1, keepdim=True)
+    target_energy = (target * target).sum(dim=1, keepdim=True) + eps
+    s_target = (dot / target_energy) * target
+    e_noise  = pred - s_target
+    num = (s_target * s_target).sum(dim=1) + eps
+    den = (e_noise  * e_noise ).sum(dim=1) + eps
+    return (10.0 * torch.log10(num / den)).mean()
 
 
 # ---------------------------------------------------------------------------
@@ -293,3 +403,108 @@ def _is_decreasing(values: Iterable[float], window: int) -> bool:
         return False
     tail = vals[-window:]
     return all(tail[i] > tail[i + 1] for i in range(len(tail) - 1))
+
+
+# ---------------------------------------------------------------------------
+# Factory de loss combinée
+# ---------------------------------------------------------------------------
+
+# Convention pour le batch d'entrée :
+#   batch["pred_mag"]   : (B, 1, F, T)  — magnitude prédite (toujours présent)
+#   batch["clean_mag"]  : (B, 1, F, T)  — magnitude propre cible
+#   batch["pred_wav"]   : (B, T)        — waveform prédit (si mr_stft active)
+#   batch["clean_wav"]  : (B, T)        — waveform propre cible
+
+LossFn = Callable[[dict[str, Any]], torch.Tensor]
+
+
+def build_loss(config: dict) -> LossFn:
+    """Construit la closure de loss combinée à partir de la config.
+
+    La loss totale est une somme pondérée :
+        L = w_mse · MSE(pred_mag, clean_mag)
+          + w_l1c · L1(pred_mag^0.3, clean_mag^0.3)
+          + w_mr  · MR-STFT(pred_wav, clean_wav)
+
+    Les poids sont lus dans `config["loss_weights"]` (clés : "mse", "l1_comp",
+    "mr_stft"). Une composante à poids 0 est skippée (économie de compute).
+    Si tous les poids sont nuls, on retombe sur la MSE seule par sécurité.
+
+    Le retour est une closure `(batch) -> scalar` que train.py appelle après
+    avoir préparé le dict (forward + éventuelle ISTFT pour MR-STFT).
+    """
+    # Mode complex spectral mapping : loss dédiée (Re/Im + magnitude + MR-STFT).
+    if str(config.get("output_mode", "mask")) == "complex":
+        return _build_complex_loss(config)
+
+    weights   = dict(config.get("loss_weights", {"l1_comp": 1.0, "mr_stft": 1.0}))
+    fft_sizes = tuple(config.get("mr_stft_fft_sizes", (256, 512, 1024)))
+
+    def _mse(batch):    return magnitude_mse_loss(batch["pred_mag"], batch["clean_mag"])
+    def _l1c(batch):    return l1_compressed_loss(batch["pred_mag"], batch["clean_mag"])
+    def _mrstft(batch):
+        if batch.get("pred_wav") is None or batch.get("clean_wav") is None:
+            raise ValueError(
+                "mr_stft loss requiert batch['pred_wav'] et batch['clean_wav']. "
+                "Vérifie que le forward fournit les waveforms (loss_requires_waveform)."
+            )
+        return mr_stft_loss(batch["pred_wav"], batch["clean_wav"], fft_sizes=fft_sizes)
+
+    funcs = {"mse": _mse, "l1_comp": _l1c, "mr_stft": _mrstft}
+    active = [(name, float(w)) for name, w in weights.items()
+              if name in funcs and w and w > 0]
+    if not active:
+        # Sécurité : aucun poids actif → on retombe sur MSE pour ne pas planter.
+        return _mse
+
+    def _combo(batch):
+        total = None
+        for name, w in active:
+            term = funcs[name](batch) * w
+            total = term if total is None else (total + term)
+        return total
+    return _combo
+
+
+def _build_complex_loss(config: dict) -> LossFn:
+    """Loss du complex spectral mapping.
+
+        L = w_ri  · [L1(Re) + L1(Im)]
+          + w_mag · L1(|·|)
+          + w_mr  · MR-STFT(pred_wav, clean_wav)
+
+    Poids lus dans `config["csm_loss_weights"]` (clés "ri", "mag", "mr_stft").
+    Le batch doit contenir `pred_ri`/`clean_ri` (B,2,F,T) et, si w_mr>0,
+    `pred_wav`/`clean_wav`.
+    """
+    w = dict(config.get("csm_loss_weights", {"ri": 1.0, "mag": 1.0, "mr_stft": 1.0}))
+    fft_sizes = tuple(config.get("mr_stft_fft_sizes", (256, 512, 1024)))
+    w_ri  = float(w.get("ri", 1.0))
+    w_mag = float(w.get("mag", 1.0))
+    w_mr  = float(w.get("mr_stft", 1.0))
+
+    def _loss(batch):
+        l_ri, l_mag = complex_spectral_loss(batch["pred_ri"], batch["clean_ri"])
+        total = w_ri * l_ri + w_mag * l_mag
+        if w_mr > 0:
+            if batch.get("pred_wav") is None or batch.get("clean_wav") is None:
+                raise ValueError("csm mr_stft loss requiert pred_wav/clean_wav.")
+            total = total + w_mr * mr_stft_loss(
+                batch["pred_wav"], batch["clean_wav"], fft_sizes=fft_sizes)
+        return total
+    return _loss
+
+
+def loss_requires_waveform(config: dict) -> bool:
+    """True si la loss configurée a besoin des waveforms (pred/clean).
+
+    train.py utilise ce flag pour décider s'il doit faire l'ISTFT pendant
+    le forward — coûteuse, donc évitée si pas nécessaire. Avec la baseline
+    p2 (mr_stft > 0), c'est True. En mode complex, on a toujours besoin des
+    waveforms (MR-STFT + SI-SDR de validation).
+    """
+    if str(config.get("output_mode", "mask")) == "complex":
+        return True
+    weights = dict(config.get("loss_weights", {}))
+    w = weights.get("mr_stft", 0)
+    return bool(w and w > 0)

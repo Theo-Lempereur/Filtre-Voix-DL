@@ -697,6 +697,56 @@ def _effective_configs_for_sample(split: str, sample_index: int) -> tuple[dict, 
     return gen_cfg, augment_cfg, str(selected.get("name", ""))
 
 
+def _partition_sources_by_split(
+    files: list[str],
+    split_ratios: tuple,
+    seed: int,
+    kind: str,
+) -> dict[str, list[str]]:
+    """Partitionne une liste de fichiers sources en 3 sous-pools disjoints.
+
+    Tri stable (par chemin) puis shuffle seedé, pour que la partition soit
+    reproductible et indépendante de l'ordre de découverte FS. Les ratios
+    sont (train, val, test). Si un sous-pool serait vide alors qu'il devait
+    contenir des samples, on lève — mieux vaut planter tôt que silencieusement
+    générer un dataset sans isolation pour ce split.
+    """
+    if len(split_ratios) != 3:
+        raise ValueError(
+            f"split_ratios doit avoir 3 valeurs (train, val, test), reçu {split_ratios}"
+        )
+
+    total_ratio = sum(split_ratios)
+    if total_ratio <= 0:
+        raise ValueError(f"split_ratios invalides : {split_ratios}")
+
+    ordered = sorted(files)
+    rng = random.Random(seed)
+    rng.shuffle(ordered)
+
+    n = len(ordered)
+    n_train = int(n * split_ratios[0] / total_ratio)
+    n_val = int(n * split_ratios[1] / total_ratio)
+    # Le test ramasse le reste pour ne perdre aucun fichier par arrondi.
+    n_test = n - n_train - n_val
+
+    partition = {
+        "train": ordered[:n_train],
+        "val": ordered[n_train:n_train + n_val],
+        "test": ordered[n_train + n_val:n_train + n_val + n_test],
+    }
+
+    for split, sub in partition.items():
+        if not sub:
+            raise RuntimeError(
+                f"Partition {kind} pour split '{split}' est vide "
+                f"(total={n}, ratios={split_ratios}). Augmenter le nombre "
+                f"de fichiers sources ou désactiver enforce_split_isolation."
+            )
+
+    return partition
+
+
 def _ensure_output_dirs(cfg: DatasetGenerationConfig) -> None:
     """Create split output folders required by the generation stage.
 
@@ -794,6 +844,30 @@ def run_dataset_generation(
 
     split_counts = _split_counts(cfg)
 
+    # Partitionne (ou pas) les sources clean/noise en pools par split.
+    if cfg.enforce_split_isolation:
+        clean_by_split = _partition_sources_by_split(
+            clean_files, cfg.split_ratios, seed=cfg.seed, kind="clean",
+        )
+        noise_by_split = _partition_sources_by_split(
+            noise_files, cfg.split_ratios, seed=cfg.seed + 1, kind="noise",
+        )
+        logger.info("Isolation splits activée — partition des sources :")
+        for split in ["train", "val", "test"]:
+            logger.info(
+                f"  {split}: clean={len(clean_by_split[split])} | "
+                f"noise={len(noise_by_split[split])}"
+            )
+    else:
+        # Pool global partagé entre tous les splits (ancien comportement,
+        # déconseillé : fuite train→val/test).
+        clean_by_split = {split: clean_files for split in ["train", "val", "test"]}
+        noise_by_split = {split: noise_files for split in ["train", "val", "test"]}
+        logger.warning(
+            "enforce_split_isolation=False : les sources clean/noise sont "
+            "partagées entre train/val/test (fuite possible)."
+        )
+
     cfg_dict = cfg.to_dict()
     augment_cfg = augment_cfg or {"enabled": False}
 
@@ -801,29 +875,83 @@ def run_dataset_generation(
     total_skipped = 0
     total_errors = 0
 
-    if cfg.max_workers <= 1:
+    def _run_split_sequential(split: str, count: int) -> None:
+        nonlocal total_generated, total_skipped, total_errors
+
         _init_worker(
-            clean_files=clean_files,
-            noise_files=noise_files,
+            clean_files=clean_by_split[split],
+            noise_files=noise_by_split[split],
             cfg_dict=cfg_dict,
             augment_cfg=augment_cfg,
         )
 
-        for split, count in split_counts.items():
-            logger.info(f"Generating split {split}: {count} samples")
+        logger.info(f"Génération split {split} : {count} samples")
+
+        for batch_start in range(0, count, cfg.batch_size):
+            batch_end = min(batch_start + cfg.batch_size, count)
+            batch_indices = range(batch_start, batch_end)
+
+            metadata_rows = []
+            error_rows = []
+
+            for idx in tqdm(
+                batch_indices,
+                desc=f"{split} [{batch_start}:{batch_end}]",
+            ):
+                result = _generate_one_sample(split, idx)
+
+                metadata_rows.extend(result["metadata"])
+                error_rows.extend(result["errors"])
+
+                total_generated += result["generated"]
+                total_skipped += result["skipped"]
+                total_errors += len(result["errors"])
+
+            append_rows(metadata_file, GEN_METADATA_FIELDS, metadata_rows)
+            append_rows(errors_file, GEN_ERROR_FIELDS, error_rows)
+
+            logger.info(
+                f"{split} batch {batch_start}-{batch_end} | "
+                f"generated={len(metadata_rows)} | "
+                f"errors={len(error_rows)}"
+            )
+
+    def _run_split_parallel(split: str, count: int) -> None:
+        nonlocal total_generated, total_skipped, total_errors
+
+        # Un pool par split — ré-initialise _CLEAN_FILES / _NOISE_FILES avec
+        # le sous-pool isolé via initializer. Coût : recréation du pool entre
+        # splits (négligeable pour 3 splits).
+        with ProcessPoolExecutor(
+            max_workers=cfg.max_workers,
+            initializer=_init_worker,
+            initargs=(
+                clean_by_split[split],
+                noise_by_split[split],
+                cfg_dict,
+                augment_cfg,
+            ),
+        ) as executor:
+            logger.info(f"Génération split {split} : {count} samples")
 
             for batch_start in range(0, count, cfg.batch_size):
                 batch_end = min(batch_start + cfg.batch_size, count)
-                batch_indices = range(batch_start, batch_end)
+                batch_indices = list(range(batch_start, batch_end))
+
+                futures = [
+                    executor.submit(_generate_one_sample, split, idx)
+                    for idx in batch_indices
+                ]
 
                 metadata_rows = []
                 error_rows = []
 
-                for idx in tqdm(
-                    batch_indices,
+                for future in tqdm(
+                    as_completed(futures),
+                    total=len(futures),
                     desc=f"{split} [{batch_start}:{batch_end}]",
                 ):
-                    result = _generate_one_sample(split, idx)
+                    result = future.result()
 
                     metadata_rows.extend(result["metadata"])
                     error_rows.extend(result["errors"])
@@ -841,50 +969,11 @@ def run_dataset_generation(
                     f"errors={len(error_rows)}"
                 )
 
-    else:
-        with ProcessPoolExecutor(
-            max_workers=cfg.max_workers,
-            initializer=_init_worker,
-            initargs=(clean_files, noise_files, cfg_dict, augment_cfg),
-        ) as executor:
-
-            for split, count in split_counts.items():
-                logger.info(f"Generating split {split}: {count} samples")
-
-                for batch_start in range(0, count, cfg.batch_size):
-                    batch_end = min(batch_start + cfg.batch_size, count)
-                    batch_indices = list(range(batch_start, batch_end))
-
-                    futures = [
-                        executor.submit(_generate_one_sample, split, idx)
-                        for idx in batch_indices
-                    ]
-
-                    metadata_rows = []
-                    error_rows = []
-
-                    for future in tqdm(
-                        as_completed(futures),
-                        total=len(futures),
-                        desc=f"{split} [{batch_start}:{batch_end}]",
-                    ):
-                        result = future.result()
-
-                        metadata_rows.extend(result["metadata"])
-                        error_rows.extend(result["errors"])
-
-                        total_generated += result["generated"]
-                        total_skipped += result["skipped"]
-                        total_errors += len(result["errors"])
-
-                    append_rows(metadata_file, GEN_METADATA_FIELDS, metadata_rows)
-                    append_rows(errors_file, GEN_ERROR_FIELDS, error_rows)
-
-                    logger.info(
-                        f"{split} batch {batch_start}-{batch_end} | "
-                        f"generated={len(metadata_rows)} | "
-                        f"errors={len(error_rows)}"
-                    )
+    for split, count in split_counts.items():
+        if cfg.max_workers <= 1:
+            _run_split_sequential(split, count)
+        else:
+            _run_split_parallel(split, count)
 
     logger.info("Generation completed")
     logger.info(f"Generated samples: {total_generated}")

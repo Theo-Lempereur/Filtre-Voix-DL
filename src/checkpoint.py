@@ -54,8 +54,11 @@ def save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # torch.compile enveloppe le modèle (préfixe `_orig_mod.` dans le state_dict).
+    # On sauve le module sous-jacent -> checkpoints compatibles compiled/non.
+    core_model = getattr(model, "_orig_mod", model)
     payload = {
-        "model_state":        model.state_dict(),
+        "model_state":        core_model.state_dict(),
         "optimizer_state":    optimizer.state_dict() if optimizer is not None else None,
         "scheduler_state":    scheduler.state_dict() if scheduler is not None else None,
         "epoch":              int(epoch),
@@ -96,7 +99,8 @@ def load_checkpoint(
     # pas seulement des tenseurs. Le fichier provient toujours de notre code.
     payload = torch.load(path, map_location=device, weights_only=False)
 
-    model.load_state_dict(payload["model_state"], strict=strict)
+    # Charge dans le module sous-jacent si le modèle est compilé (cf. save).
+    getattr(model, "_orig_mod", model).load_state_dict(payload["model_state"], strict=strict)
     if optimizer is not None and payload.get("optimizer_state") is not None:
         optimizer.load_state_dict(payload["optimizer_state"])
     if scheduler is not None and payload.get("scheduler_state") is not None:
