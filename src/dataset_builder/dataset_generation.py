@@ -630,35 +630,31 @@ def _split_counts(cfg: DatasetGenerationConfig) -> dict[str, int]:
     }
 
 
-def _global_sample_index(split: str, sample_index: int) -> int:
-    """Map a split-local index to the global generation order used by templates.
+def _split_size(split: str) -> int:
+    """Return the requested number of generated samples for one split.
 
     Args:
         split: Dataset split name.
-        sample_index: Index inside that split.
 
     Returns:
-        Global zero-based generation index across train, validation, and test.
+        Sample count for that split, or 0 if unknown.
     """
-    counts = {
+    return {
         "train": int(_GEN_CFG.get("num_train_samples", 0)),
         "val": int(_GEN_CFG.get("num_val_samples", 0)),
         "test": int(_GEN_CFG.get("num_test_samples", 0)),
-    }
-    offsets = {
-        "train": 0,
-        "val": counts["train"],
-        "test": counts["train"] + counts["val"],
-    }
-    return offsets[split] + sample_index
+    }.get(split, 0)
 
 
 def _effective_configs_for_sample(split: str, sample_index: int) -> tuple[dict, dict, str]:
     """Return template-specific generation and augmentation settings for one sample.
 
     The novice GUI writes ``generation.template_mix`` as a sequence of template
-    blocks. This function maps the global sample index to the matching template,
-    then overlays template-specific generation and augmentation values.
+    blocks. Each block's ``count`` is interpreted as a relative weight, and the
+    template is selected by the sample's proportional position *within its own
+    split*. This guarantees that train, validation, and test all receive the
+    same template mixture — unlike a global generation index, which would push
+    the later templates entirely into val/test and leave them unrepresentative.
 
     Args:
         split: Dataset split name.
@@ -672,18 +668,24 @@ def _effective_configs_for_sample(split: str, sample_index: int) -> tuple[dict, 
     if not template_mix:
         return dict(_GEN_CFG), dict(_AUGMENT_CFG), ""
 
-    global_index = _global_sample_index(split, sample_index)
-    cursor = 0
-    selected = template_mix[-1]
+    total_count = sum(max(0, int(t.get("count", 0))) for t in template_mix)
+    split_size = _split_size(split)
 
-    for item in template_mix:
-        count = int(item.get("count", 0))
-        if count <= 0:
-            continue
-        if global_index < cursor + count:
-            selected = item
-            break
-        cursor += count
+    selected = template_mix[-1]
+    if total_count > 0 and split_size > 0:
+        # Projette l'index local du sample sur l'espace cumulé des poids,
+        # mis à l'échelle de la taille du split. Les proportions de templates
+        # sont ainsi reproduites à l'identique dans chaque split.
+        target = sample_index * total_count / split_size
+        cursor = 0
+        for item in template_mix:
+            count = int(item.get("count", 0))
+            if count <= 0:
+                continue
+            if target < cursor + count:
+                selected = item
+                break
+            cursor += count
 
     gen_cfg = dict(_GEN_CFG)
     augment_cfg = dict(_AUGMENT_CFG)
