@@ -18,13 +18,11 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src import audio, config as cfg
-from src.checkpoint import load_checkpoint, peek_checkpoint_config
-from src.model import UNet
+from src.denoiser import Denoiser
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,31 +125,34 @@ def pick_pairs(n: int, seed: int) -> list[tuple[str, str, str]]:
     return [(name, str(noisy_dir / name), str(clean_dir / name)) for name in picked]
 
 
-@torch.no_grad()
-def denoise(model: UNet, noisy_wav: np.ndarray, device: torch.device) -> np.ndarray:
-    """noisy_wav (4 s, 64000 samples) -> wav prédit (même longueur).
+def si_sdr_db(est: np.ndarray, ref: np.ndarray, eps: float = 1e-8) -> float:
+    """SI-SDR (scale-invariant) en dB entre une estimation et une référence.
 
-    Recette p2 figée :
-      - entrée du réseau : `log1p(noisy_mag)`
-      - masque réel `sigmoid × noisy_mag` (sortie du modèle)
-      - reconstruction ISTFT avec la phase du noisy
+    Accompagne l'écoute d'un repère chiffré par extrait. ⚠️ Intrusif : biaisé par
+    la qualité imparfaite de la référence « clean » — à lire à titre indicatif,
+    l'oreille reste le juge n°1.
     """
-    spec = audio.stft(noisy_wav)
-    mag, phase = audio.magnitude_phase(spec)
-    mag_t = torch.from_numpy(mag).float().unsqueeze(0).unsqueeze(0).to(device)   # (1,1,F,T)
-
-    model_in = torch.log1p(mag_t)
-    pred_mag_t = model(model_in, mag_t)
-
-    pred_mag = pred_mag_t.squeeze(0).squeeze(0).cpu().numpy()
-    return audio.reconstruct(pred_mag, phase, length=cfg.CLIP_SAMPLES)
+    est = est.astype(np.float64); ref = ref.astype(np.float64)
+    n = min(len(est), len(ref))
+    est, ref = est[:n], ref[:n]
+    est = est - est.mean(); ref = ref - ref.mean()
+    alpha = float(np.dot(est, ref) / (np.dot(ref, ref) + eps))
+    target = alpha * ref
+    noise = est - target
+    return float(10.0 * np.log10((np.dot(target, target) + eps)
+                                 / (np.dot(noise, noise) + eps)))
 
 
 def main() -> int:
+    # Force UTF-8 sur stdout/stderr : les résumés contiennent des caractères
+    # non-ASCII (Δ, ★) qui plantent une console Windows cp1252 à l'affichage.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
     args = parse_args()
-    device = torch.device(args.device) if args.device else torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
-    )
 
     run, ckpt = resolve_run_and_ckpt(args.run, args.ckpt)
     ckpt_path = Path(cfg.CHECKPOINTS) / run / ckpt
@@ -159,22 +160,24 @@ def main() -> int:
         print(f"[err] checkpoint introuvable : {ckpt_path}", file=sys.stderr)
         return 1
 
-    ckpt_cfg = peek_checkpoint_config(ckpt_path)
-    base_channels = int(ckpt_cfg.get("base_channels", cfg.BASE_CHANNELS))
-    norm_groups = int(ckpt_cfg.get("norm_groups", cfg.NORM_GROUPS))
-    model = UNet(base_channels=base_channels, norm_groups=norm_groups).to(device)
-    info = load_checkpoint(ckpt_path, model, device=device)
-    model.eval()
+    # La boîte gère le chargement (détection mask/complex), le contrat d'entrée
+    # et le forward. Sur un clip de 4 s, `denoise` = une fenêtre (non-régression).
+    denoiser = Denoiser(ckpt_path, device=args.device)
+    info = denoiser.info
+    mode_str = denoiser.output_mode + (
+        f" (c={denoiser.c_comp})" if denoiser.output_mode == "complex" else "")
     print(f"[ckpt] {ckpt_path.name} | epoch={info['epoch']} "
           f"| val_loss={info['best_val_loss']:.4f} "
           f"| val_si_sdri={info['best_val_si_sdri']:.3f} "
-          f"| base_channels={base_channels} | device={device}")
+          f"| mode={mode_str} | base_channels={denoiser.base_channels} "
+          f"| device={denoiser.device}")
 
     pairs = pick_pairs(args.n, args.seed)
     ckpt_stem = Path(ckpt).stem
     out_root = Path(cfg.OUTPUTS) / "listen" / run / ckpt_stem
     out_root.mkdir(parents=True, exist_ok=True)
 
+    sdri_sum = 0.0
     for idx, (name, noisy_path, clean_path) in enumerate(pairs):
         stem = Path(name).stem
         out_dir = out_root / f"{idx:02d}_{stem}"
@@ -182,14 +185,23 @@ def main() -> int:
 
         noisy_wav = audio.fix_length(audio.load_audio(noisy_path), mode="center")
         clean_wav = audio.fix_length(audio.load_audio(clean_path), mode="center")
-        pred_wav = denoise(model, noisy_wav, device)
+        pred_wav = denoiser.denoise(noisy_wav)
 
         sf.write(out_dir / "noisy.wav", noisy_wav, cfg.SAMPLE_RATE)
         sf.write(out_dir / "pred.wav", pred_wav, cfg.SAMPLE_RATE)
         sf.write(out_dir / "clean.wav", clean_wav, cfg.SAMPLE_RATE)
-        print(f"  [{idx:02d}] {name} -> {out_dir}")
 
-    print(f"\nOK -> {out_root}")
+        # Repère chiffré par extrait, à confronter à l'écoute.
+        sdr_pred = si_sdr_db(pred_wav, clean_wav)
+        sdr_noisy = si_sdr_db(noisy_wav, clean_wav)
+        sdri_sum += sdr_pred - sdr_noisy
+        print(f"  [{idx:02d}] {name}  SI-SDR pred {sdr_pred:+.2f} dB "
+              f"(noisy {sdr_noisy:+.2f}, Δ {sdr_pred - sdr_noisy:+.2f} dB) -> {out_dir}")
+
+    if pairs:
+        print(f"\n[moyenne] SI-SDRi sur {len(pairs)} extraits : "
+              f"{sdri_sum / len(pairs):+.2f} dB  (indicatif — l'oreille prime)")
+    print(f"OK -> {out_root}")
     return 0
 
 

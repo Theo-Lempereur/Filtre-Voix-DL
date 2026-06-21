@@ -34,3 +34,5 @@ Thumbs.db
 data/processed/
 data/metadata/
 data/logs/
+cache.tar
+runpodctl.exe
