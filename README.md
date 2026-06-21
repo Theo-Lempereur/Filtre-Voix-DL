@@ -155,9 +155,10 @@ La baseline actuelle est un U-Net 2D applique aux spectrogrammes :
 - sortie : masque reel `sigmoid` applique a la magnitude bruitée ;
 - reconstruction : ISTFT avec la phase du signal bruite.
 
-Le mode experimental `complex` existe dans l'entrainement pour predire le spectre
-complexe propre, mais le service d'inference actuel cible surtout la baseline
-magnitude.
+Le mode `complex` (complex spectral mapping) prédit le spectre complexe propre
+(Re/Im) pour **récupérer la phase**, ce qui dépasse le plafond du masque
+magnitude. C'est le mode du modèle de production `rp_csm_final`, et tout le chemin
+d'inférence (`src/denoiser.py`, `serve/`, paquet `voice_denoiser`) le gère.
 
 ## API
 
@@ -183,8 +184,29 @@ GET  /models    checkpoints detectes
 POST /denoise   fichier audio -> WAV debruite 16 kHz mono
 ```
 
-Limitation importante : l'audio est actuellement ramene a une fenetre fixe de
-4 secondes.
+L'audio d'entrée peut être de **durée quelconque** : il est découpé en fenêtres
+de 4 s avec recouvrement 50 % (overlap-add), géré par `src/denoiser.py`.
+
+## Modèle téléchargeable (paquet `voice_denoiser`)
+
+Le modèle est aussi distribué comme **paquet Python autonome**, installable
+**depuis n'importe où, sans cloner le repo**, via la GitHub Release :
+
+```bash
+pip install https://github.com/Theo-Lempereur/Filtre-Voix-DL/releases/download/voice-denoiser-v1.0.0/voice_denoiser-1.0.0-py3-none-any.whl
+```
+
+```python
+from voice_denoiser import VoiceDenoiser
+box = VoiceDenoiser()                          # modèle TorchScript embarqué
+box.denoise_file("bruite.wav", "propre.wav")   # son de durée quelconque
+```
+
+Le paquet embarque le modèle (TorchScript) + le pipeline ; il ne dépend que de
+`torch`, `numpy`, `soundfile`, `librosa` (aucune dépendance au repo). Pour
+l'intégrer à un service et pour (ré)générer/publier le paquet, voir
+[export/voice_denoiser/README.md](export/voice_denoiser/README.md) et
+`scripts/export_model.py`.
 
 ## Fichiers Principaux
 
@@ -194,10 +216,13 @@ src/train.py                    Boucle d'entrainement
 src/dataset.py                  Dataset PyTorch paire noisy/clean
 src/metrics.py                  Loss, SI-SDR, suivi d'overfitting
 src/config.py                   Chemins Drive, audio, hyperparametres
+src/denoiser.py                 Boite d'inference reutilisable (long-audio)
 src/dataset_builder/            Preparation et generation du dataset
 configs/dataset_config.yaml     Configuration dataset active
 gui/                            Interfaces de configuration et training
 serve/                          API d'inference FastAPI
+export/voice_denoiser/          Paquet autonome telechargeable (TorchScript)
+scripts/export_model.py         Genere le paquet voice_denoiser depuis un ckpt
 data/README.md                  Guide court du pipeline dataset
 MEMOIRE_TECHNIQUE.md            Documentation technique detaillee
 ```

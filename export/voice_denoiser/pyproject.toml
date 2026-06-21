@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-denoiser"
+version = "1.0.0"
+description = "Débruiteur de voix autonome (U-Net complex spectral mapping, TorchScript)."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.21",
+    "soundfile>=0.12",
+    "librosa>=0.10",
+]
+
+[tool.setuptools]
+packages = ["voice_denoiser"]
+
+# Embarque le modèle TorchScript + ses métadonnées dans le wheel/installation.
+[tool.setuptools.package-data]
+voice_denoiser = ["*.ts", "*.json"]
