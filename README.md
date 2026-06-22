@@ -1,196 +1,41 @@
-# Filtre-Voix-DL
+# 🎙️ Filtre-Voix-DL
 
-Filtre-Voix-DL est un projet de denoising vocal supervise. Il genere des paires
-audio `bruite/propre`, entraine un U-Net sur spectrogrammes, puis expose le
-modele sous forme d'API pour filtrer une voix bruitée.
+**Un débruiteur de voix par deep learning — qui s'installe en une ligne, traite un audio de n'importe quelle durée, et restaure la voix au lieu de simplement l'atténuer.**
 
-Pour le detail technique complet du modele, des donnees, de Google Drive et de
-l'inference, voir [MEMOIRE_TECHNIQUE.md](MEMOIRE_TECHNIQUE.md).
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white)
+![Modèle](https://img.shields.io/badge/mod%C3%A8le-production-2ea44f)
+![SI--SDRi](https://img.shields.io/badge/SI--SDRi-~%2B11%20dB-blue)
+![Installation](https://img.shields.io/badge/pip-depuis%20n'importe%20o%C3%B9-orange)
 
-## Objectif
-
-Le modele apprend a transformer une voix bruitée en voix plus propre :
-
-```txt
-voix propre + bruit de fond controle
--> exemple bruite
--> U-Net de debruitage
--> estimation de la voix propre
-```
-
-Le projet couvre toute la chaine :
-
-- preparation des audios propres et des bruits ;
-- generation de paires alignées `noisy/clean` avec SNR controle ;
-- entrainement PyTorch avec checkpoints, logs et reprise ;
-- cache waveform pour accelerer l'entrainement ;
-- API FastAPI pour tester ou integrer le modele.
-
-## Installation
-
-Python 3.11 est attendu.
-
-```bash
-pip install -r requirements.txt
-```
-
-Pour servir le modele via HTTP :
-
-```bash
-pip install -r requirements-serve.txt
-```
-
-FFmpeg est recommande si les sources audio contiennent du `.mp3`, `.m4a`,
-`.aac`, `.ogg`, ou si les augmentations codec sont activees.
-
-## Donnees
-
-Les donnees brutes volumineuses restent hors Git, typiquement dans Google Drive.
-La configuration active est :
+Filtre-Voix-DL transforme une voix noyée dans le bruit de fond en une voix claire.
+Au cœur : un **U-Net** entraîné sur spectrogrammes en **complex spectral mapping**,
+qui prédit le spectre complexe propre (partie réelle + imaginaire) pour **récupérer
+la phase** — là où un masque de magnitude classique plafonne, lui va plus loin.
 
 ```txt
-configs/dataset_config.yaml
+voix + bruit de fond  ──►  U-Net (complex spectral mapping)  ──►  voix restaurée
 ```
 
-Les chemins peuvent utiliser `${DRIVE_PROJECT}` :
+---
 
-```yaml
-clean_preprocessing:
-  input_dir: "${DRIVE_PROJECT}/data/jules/wav"
+## ✨ En bref
 
-noise_preprocessing:
-  input_dir: "${DRIVE_PROJECT}/data/jules/noise/free-sound"
-```
+| | |
+|---|---|
+| 🎯 **Qualité** | ~**+11 dB de SI-SDRi** — restaure la voix, ne se contente pas de soustraire du bruit |
+| ⏱️ **Durée libre** | Tout son, de la seconde à l'heure : fenêtrage 4 s + **overlap-add 50 %**, coutures inaudibles |
+| 📦 **Portable** | Paquet **pip installable depuis n'importe où**, sans cloner le repo — modèle TorchScript embarqué |
+| ⚡ **Rapide sur GPU** | ~**150× temps réel** sur GPU ; ~0,1× temps réel sur un CPU multi-cœurs |
+| 🔌 **Prêt à servir** | API **FastAPI** clé en main + guide d'intégration web (JS / React / nginx / systemd) |
+| 🛠️ **Chaîne complète** | Génération de dataset, entraînement, checkpoints, reprise, export — tout est ici |
 
-La racine Drive est detectee automatiquement par `src/config.py`. Elle peut etre
-forcee avec :
+---
 
-```bash
-set FILTRE_VOIX_DL_ROOT=G:/Mon Drive/Filtre-Voix-DL
-```
+## 🚀 Démarrage rapide — utiliser le modèle
 
-## Pipeline Dataset
-
-Ouvrir l'interface visuelle de configuration :
-
-```bash
-python scripts/run_full_pipeline.py --gui
-```
-
-Regenerer tout le dataset :
-
-```bash
-python scripts/run_full_pipeline.py --compile --reset-all
-```
-
-Regenerer seulement les paires finales apres modification des reglages :
-
-```bash
-python scripts/run_full_pipeline.py --skip-clean --skip-noise --reset-generated
-```
-
-Verifier le dataset :
-
-```bash
-python scripts/check_dataset.py
-```
-
-Sortie attendue :
-
-```txt
-data/processed/generated/
-├── config_used.yaml
-├── train/
-│   ├── noisy/
-│   └── clean/
-├── val/
-│   ├── noisy/
-│   └── clean/
-└── test/
-    ├── noisy/
-    └── clean/
-```
-
-Les fichiers `noisy` et `clean` portent le meme nom pour permettre un appairage
-direct pendant l'entrainement.
-
-## Entrainement
-
-Construire le cache waveform, recommande pour les gros datasets :
-
-```bash
-python scripts/build_wav_cache.py --splits train val
-```
-
-Lancer un entrainement :
-
-```bash
-python scripts/train_local.py --run-id p2_baseline --epochs 50
-```
-
-Reprendre apres interruption :
-
-```bash
-python scripts/train_local.py --run-id p2_baseline --resume last
-```
-
-Checkpoints principaux :
-
-```txt
-checkpoints/<run_id>/last.pt
-checkpoints/<run_id>/best.pt
-checkpoints/<run_id>/best_si_sdri.pt
-```
-
-Par defaut, les checkpoints et les logs sont ecrits dans la racine Drive du
-projet afin de survivre aux changements de machine.
-
-## Modele
-
-La baseline actuelle est un U-Net 2D applique aux spectrogrammes :
-
-- entree : magnitude du signal bruite compressee par `log1p` ;
-- architecture : encodeur/decodeur a 4 niveaux avec skip connections ;
-- normalisation : `GroupNorm`, stable meme avec petits batchs ;
-- sortie : masque reel `sigmoid` applique a la magnitude bruitée ;
-- reconstruction : ISTFT avec la phase du signal bruite.
-
-Le mode `complex` (complex spectral mapping) prédit le spectre complexe propre
-(Re/Im) pour **récupérer la phase**, ce qui dépasse le plafond du masque
-magnitude. C'est le mode du modèle de production `rp_csm_final`, et tout le chemin
-d'inférence (`src/denoiser.py`, `serve/`, paquet `voice_denoiser`) le gère.
-
-## API
-
-Configurer un checkpoint dans `.env` :
-
-```ini
-CKPT_PATH=G:\Mon Drive\Filtre-Voix-DL\checkpoints\p2_baseline\best.pt
-DEVICE=cpu
-CORS_ORIGINS=*
-```
-
-Demarrer le serveur :
-
-```bash
-python -m uvicorn serve.server:app --host 127.0.0.1 --port 8000 --workers 1
-```
-
-Endpoints utiles :
-
-```txt
-GET  /health    etat du serveur et checkpoint charge
-GET  /models    checkpoints detectes
-POST /denoise   fichier audio -> WAV debruite 16 kHz mono
-```
-
-L'audio d'entrée peut être de **durée quelconque** : il est découpé en fenêtres
-de 4 s avec recouvrement 50 % (overlap-add), géré par `src/denoiser.py`.
-
-## Modèle téléchargeable (paquet `voice_denoiser`)
-
-Le modèle est aussi distribué comme **paquet Python autonome**, installable
-**depuis n'importe où, sans cloner le repo**, via la GitHub Release :
+Le modèle est distribué comme **paquet Python autonome**. Pas besoin de cloner le
+dépôt, pas besoin du code d'entraînement : une URL suffit.
 
 ```bash
 pip install https://github.com/Theo-Lempereur/Filtre-Voix-DL/releases/download/voice-denoiser-v1.0.0/voice_denoiser-1.0.0-py3-none-any.whl
@@ -198,39 +43,191 @@ pip install https://github.com/Theo-Lempereur/Filtre-Voix-DL/releases/download/v
 
 ```python
 from voice_denoiser import VoiceDenoiser
-box = VoiceDenoiser()                          # modèle TorchScript embarqué
-box.denoise_file("bruite.wav", "propre.wav")   # son de durée quelconque
+
+box = VoiceDenoiser()                            # modèle TorchScript embarqué, prêt à l'emploi
+box.denoise_file("bruite.wav", "propre.wav")     # fichier → fichier, n'importe quelle durée
+
+# ... ou en mémoire, pour un service :
+wav_bytes = box.denoise_bytes(open("bruite.wav", "rb").read())   # bytes → bytes (WAV 16 kHz)
+
+# ... ou sur GPU pour le temps réel :
+box = VoiceDenoiser(device="cuda")
 ```
 
-Le paquet embarque le modèle (TorchScript) + le pipeline ; il ne dépend que de
-`torch`, `numpy`, `soundfile`, `librosa` (aucune dépendance au repo). Pour
-l'intégrer à un service et pour (ré)générer/publier le paquet, voir
-[export/voice_denoiser/README.md](export/voice_denoiser/README.md) et
-`scripts/export_model.py`.
+Le paquet ne dépend que de `torch`, `numpy`, `soundfile`, `librosa` — **aucune
+dépendance au code d'entraînement**. Contrat d'entrée : le modèle travaille en
+**mono 16 kHz** ; `denoise(wav, sr=...)` met en mono et rééchantillonne pour vous.
 
-## Fichiers Principaux
+> Détails d'intégration, (ré)génération et publication du paquet :
+> [export/voice_denoiser/README.md](export/voice_denoiser/README.md).
+
+---
+
+## 📊 Performance
+
+| Métrique | Valeur | Note |
+|---|---|---|
+| **SI-SDRi** | ~**+11 dB** | amélioration mesurée vs signal bruité (split test) |
+| **Latence GPU** | ~**150× temps réel** | 30 s d'audio traité en ~0,2 s |
+| **Latence CPU** | ~**0,1× temps réel** | 6 s d'audio en ~0,8 s sur un CPU 8 cœurs |
+| **Format** | mono 16 kHz | sortie WAV, quel que soit le format d'entrée |
+
+> Le modèle est *compute-bound* : une seule fenêtre de 4 s sature déjà un CPU
+> multi-cœurs. **Pour du débit ou du temps réel, déployez sur GPU** — c'est la
+> configuration pour laquelle il est conçu.
+
+---
+
+## 🧠 Comment ça marche
+
+Le pipeline d'inférence est encapsulé dans une seule « boîte » réutilisable
+([src/denoiser.py](src/denoiser.py), et sa copie autonome dans le paquet) :
+
+1. **STFT** du signal bruité (`n_fft=512`, `hop=128`, 16 kHz).
+2. **Power-compression** des parties réelle/imaginaire (`|S|^(c-1)`, `c=0.3`).
+3. **U-Net** (encodeur/décodeur 4 niveaux, `GroupNorm`) → spectre complexe propre estimé.
+4. **Décompression** + **ISTFT** → forme d'onde, **avec la phase reconstruite**.
+5. Pour les sons > 4 s : **fenêtrage glissant 4 s + overlap-add pondéré (Hann, 50 %)**
+   → reconstruction COLA-exacte, sans artefact de couture. Les fenêtres sont
+   traitées **par batch** (mémoire bornée).
+
+Le mode historique `mask` (`sigmoid × magnitude`, phase bruitée conservée) reste
+supporté pour rétrocompatibilité, mais le **mode de production est `complex`** :
+en apprenant la phase, il dépasse le plafond intrinsèque du masque de magnitude.
+
+> Documentation technique complète (données, STFT, pertes, métriques, entraînement) :
+> [MEMOIRE_TECHNIQUE.md](MEMOIRE_TECHNIQUE.md).
+
+---
+
+## 🔧 Construire, entraîner, réentraîner
+
+Le dépôt couvre **toute la chaîne**, pas seulement l'inférence.
+
+### Installation (développement)
+
+Python 3.11 attendu. Voir [SETUP.md](SETUP.md) pour le guide complet (venv, Drive, GPU).
+
+```bash
+pip install -r requirements.txt            # base (CPU)
+pip install -r requirements-serve.txt      # pour servir l'API
+pip install -r requirements-gpu.txt        # surcouche CUDA 12.8 (entraînement GPU)
+```
+
+FFmpeg est recommandé si les sources contiennent du `.mp3`, `.m4a`, `.aac`, `.ogg`.
+
+### 1. Générer un dataset
+
+Paires `noisy/clean` alignées, avec SNR contrôlé et augmentations. Interface visuelle :
+
+```bash
+python scripts/run_full_pipeline.py --gui          # configuration (novice / expert)
+python scripts/run_full_pipeline.py --compile --reset-all   # tout régénérer
+python scripts/check_dataset.py                    # vérifier le dataset
+```
+
+Détail des étapes et de la config : [data/README.md](data/README.md). La config
+active est `configs/dataset_config.yaml` ; chaque génération archive son
+`config_used.yaml` pour une traçabilité totale.
+
+### 2. Entraîner
+
+```bash
+python scripts/build_wav_cache.py --splits train val        # cache waveform (gros datasets)
+python scripts/train_local.py --run-id mon_run --epochs 100 # entraînement
+python scripts/train_local.py --run-id mon_run --resume last # reprise après coupure
+```
+
+Checkpoints produits : `best_si_sdri.pt`, `best.pt`, `last.pt`. Logs, checkpoints
+et outputs vont sur la racine Drive du projet (survivent aux changements de machine).
+Pour les gros runs sur GPU loué, voir [RUNPOD.md](RUNPOD.md).
+
+### 3. Exporter un nouveau modèle
+
+```bash
+python scripts/export_model.py --ckpt mon_run       # → model.ts + metadata.json
+```
+
+Génère le paquet `voice_denoiser` autonome (TorchScript + métadonnées). Procédure
+complète (build du wheel, publication en GitHub Release) :
+[export/voice_denoiser/README.md](export/voice_denoiser/README.md).
+
+---
+
+## 🔌 Servir le modèle (API)
+
+Une API **FastAPI** prête à l'emploi expose le débruiteur en HTTP.
+
+```bash
+python -m uvicorn serve.server:app --host 127.0.0.1 --port 8000 --workers 1
+```
 
 ```txt
-src/model.py                    Architecture U-Net
-src/train.py                    Boucle d'entrainement
-src/dataset.py                  Dataset PyTorch paire noisy/clean
-src/metrics.py                  Loss, SI-SDR, suivi d'overfitting
-src/config.py                   Chemins Drive, audio, hyperparametres
-src/denoiser.py                 Boite d'inference reutilisable (long-audio)
-src/dataset_builder/            Preparation et generation du dataset
-configs/dataset_config.yaml     Configuration dataset active
-gui/                            Interfaces de configuration et training
-serve/                          API d'inference FastAPI
-export/voice_denoiser/          Paquet autonome telechargeable (TorchScript)
-scripts/export_model.py         Genere le paquet voice_denoiser depuis un ckpt
-data/README.md                  Guide court du pipeline dataset
-MEMOIRE_TECHNIQUE.md            Documentation technique detaillee
+GET  /health    état du serveur + checkpoint chargé
+GET  /models    checkpoints détectés
+POST /denoise   fichier audio (durée quelconque) → WAV débruité 16 kHz mono
 ```
 
-## Notes
+Intégration web complète (JavaScript, React, nginx, systemd, CORS) :
+[serve/INTEGRATION.md](serve/INTEGRATION.md).
 
-- Les notebooks ne sont pas necessaires pour lancer le pipeline principal.
-- Les gros fichiers audio, caches, checkpoints et datasets generes ne doivent
-  pas etre versionnes dans Git.
-- `config_used.yaml` doit etre conserve avec tout dataset utilise pour entrainer
-  un modele, car il documente exactement sa generation.
+---
+
+## 📁 Structure du projet
+
+```txt
+src/
+├── denoiser.py              Boîte d'inférence réutilisable (durée libre, batch, mask/complex)
+├── model.py                 Architecture U-Net
+├── train.py                 Boucle d'entraînement
+├── dataset.py               Dataset PyTorch (paires noisy/clean)
+├── metrics.py               Pertes, SI-SDR, suivi d'overfitting
+├── config.py                Chemins, audio, hyperparamètres
+└── dataset_builder/         Préparation et génération du dataset
+configs/dataset_config.yaml  Configuration dataset active
+scripts/
+├── run_full_pipeline.py     Pipeline dataset (GUI + CLI)
+├── train_local.py           Entraînement local (lock partagé, reprise)
+├── export_model.py          Génère le paquet voice_denoiser depuis un checkpoint
+├── denoise_file.py          Débruite un fichier en CLI
+└── listen_test.py           Génère noisy/pred/clean pour l'écoute + SI-SDR
+serve/                       API d'inférence FastAPI + guide d'intégration
+export/voice_denoiser/       Paquet autonome téléchargeable (TorchScript)
+gui/                         Interfaces de configuration et d'entraînement
+MEMOIRE_TECHNIQUE.md         Documentation technique détaillée
+SETUP.md                     Guide d'installation et workflow d'équipe
+```
+
+---
+
+## 🗺️ Limites & pistes
+
+- **Latence CPU** : le modèle privilégie la **qualité** ; pour du temps réel CPU
+  (type DeepFilterNet), il faudrait un modèle plus léger (features ERB,
+  convolutions séparables) — piste de réentraînement, hors périmètre actuel.
+- **API mono-worker** : suffisant pour un usage modéré ; pour de la charge,
+  plusieurs workers ou une file d'attente.
+- **MP3 / OGG en entrée** : nécessitent FFmpeg sur la machine (WAV/FLAC sans).
+
+---
+
+## 📚 Index de la documentation
+
+| Document | Pour qui / quoi |
+|---|---|
+| [README.md](README.md) | Vue d'ensemble (ce fichier) |
+| [export/voice_denoiser/README.md](export/voice_denoiser/README.md) | **Utiliser le paquet** dans un service |
+| [serve/INTEGRATION.md](serve/INTEGRATION.md) | **Intégrer l'API** à un site web |
+| [data/README.md](data/README.md) | Pipeline de génération du dataset |
+| [SETUP.md](SETUP.md) | Installation & workflow de développement |
+| [RUNPOD.md](RUNPOD.md) | Entraînement sur GPU loué (RunPod) |
+| [MEMOIRE_TECHNIQUE.md](MEMOIRE_TECHNIQUE.md) | Référence technique approfondie |
+
+---
+
+## ⚖️ Licence & contexte
+
+Projet académique de débruitage vocal supervisé, développé en équipe. Les gros
+fichiers (audio, caches, checkpoints, datasets générés) restent **hors Git**
+(Google Drive). `config_used.yaml` doit accompagner tout dataset d'entraînement.
+</content>

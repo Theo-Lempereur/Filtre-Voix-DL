@@ -11,7 +11,7 @@ L'API prend un fichier audio (voix bruitée) et renvoie un WAV débruité.
 ### Configuration (`.env` à la racine du projet)
 
 ```ini
-CKPT_PATH=G:\Mon Drive\Filtre-Voix-DL\checkpoints\p2_combo_mrstft\best.pt
+CKPT_PATH=G:\Mon Drive\Filtre-Voix-DL\checkpoints\rp_csm_final\best_si_sdri.pt
 DEVICE=cpu
 CORS_ORIGINS=*
 ```
@@ -68,9 +68,8 @@ Débruite un fichier audio.
 | **Content-Type** | `multipart/form-data` |
 | **Champ** | `file` — le fichier audio |
 | **Formats entrée** | WAV, FLAC (natif) · MP3, OGG (si ffmpeg installé) |
+| **Durée** | **Quelconque** — un son > 4 s est découpé en fenêtres de 4 s avec recouvrement 50 % (overlap-add) puis recombiné ; coutures inaudibles |
 | **Réponse** | `200` — corps = WAV binaire (`audio/wav`), mono 16 kHz PCM 16 bits |
-
-> ⚠️ **L'audio est tronqué/complété à 4 secondes** (limitation actuelle). Un clip plus long est coupé au centre ; plus court, il est complété par du silence.
 
 **Codes d'erreur :**
 
@@ -241,8 +240,8 @@ location /api/ {
     proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header   X-Forwarded-Proto $scheme;
 
-    client_max_body_size 10m;   # uploads audio
-    proxy_read_timeout   30s;   # l'inférence peut prendre 1-3 s sur CPU
+    client_max_body_size 25m;   # uploads audio (sons longs)
+    proxy_read_timeout   120s;  # l'inférence grandit avec la durée du son sur CPU
 }
 ```
 
@@ -291,9 +290,10 @@ sudo systemctl status filtre-voix-api
 
 ## 7. Notes & limites
 
-- **Durée fixe 4 s** : limitation actuelle. Le traitement de clips plus longs (fenêtrage glissant) est prévu plus tard.
+- **Durée quelconque** : un son > 4 s est fenêtré (4 s, overlap-add 50 %) et recombiné par l'API. La latence croît avec la durée (compute-bound sur CPU) → préférer un **GPU** (`DEVICE=cuda`) pour les sons longs ou la charge.
 - **Sortie toujours en WAV 16 kHz mono**, quel que soit le format d'entrée.
 - **MP3 / OGG en entrée** nécessitent **ffmpeg** installé sur le serveur (`apt install ffmpeg`). WAV et FLAC fonctionnent sans.
 - **Un seul worker** : les requêtes sont traitées séquentiellement. Suffisant pour un usage modéré ; pour de la charge, voir mise à l'échelle (plusieurs workers CPU ou file d'attente).
-- **Compatibilité modèle** : `CKPT_PATH` doit pointer vers un checkpoint entraîné avec le `model.py` actuel (architecture GroupNorm). Les runs `p3_bigru_softplus` / `p4_cirm` (archi étendue) ne se chargeront pas.
+- **Compatibilité modèle** : `CKPT_PATH` doit pointer vers un checkpoint entraîné avec le `model.py` actuel (architecture `GroupNorm`, mode `mask` ou `complex`). Le serveur détecte le mode automatiquement.
+- **Alternative sans le repo** : pour intégrer le modèle ailleurs sans cloner ce dépôt, utiliser le paquet autonome `voice_denoiser` (voir [../export/voice_denoiser/README.md](../export/voice_denoiser/README.md)).
 ```

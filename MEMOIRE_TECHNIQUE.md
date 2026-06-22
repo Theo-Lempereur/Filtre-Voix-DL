@@ -479,9 +479,10 @@ bin spectral au-dessus de la magnitude bruitée. Cette contrainte stabilise
 l'apprentissage mais impose une limite : le modele travaille surtout par
 attenuation et conserve la phase du signal bruite.
 
-## 11. Mode Complexe Experimental
+## 11. Mode Complexe (Production)
 
-`src/train.py` supporte aussi :
+`src/train.py` supporte, **en plus** du mode masque historique, le mode complex
+spectral mapping — c'est le **mode du modele de production** :
 
 ```txt
 output_mode = "complex"
@@ -492,7 +493,7 @@ Dans ce mode :
 - l'entree contient deux canaux : reel et imaginaire du spectre bruite ;
 - la sortie contient deux canaux : reel et imaginaire du spectre propre estime ;
 - la tete du U-Net devient lineaire ;
-- la phase peut etre corrigee, pas seulement reutilisee.
+- la phase est **corrigee**, pas seulement reutilisee.
 
 La compression utilise :
 
@@ -501,10 +502,12 @@ Z = |S|^c * exp(j theta)
 c = 0.3
 ```
 
-Puis le signal est decompresse avant l'ISTFT. Ce mode peut theoriquement
-depasser le plafond du masque de magnitude, car il apprend aussi la phase. Il
-est cependant plus sensible et l'API actuelle reconstruit principalement la
-baseline magnitude classique.
+Puis le signal est decompresse avant l'ISTFT. En apprenant la phase, ce mode
+**depasse le plafond du masque de magnitude** (qui ne peut qu'attenuer en
+conservant la phase bruitee). Tout le chemin d'inference le gere de bout en
+bout : `src/denoiser.py` (boite reutilisable), l'API `serve/`, et le paquet
+autonome `voice_denoiser` (TorchScript) detectent et appliquent ce mode
+automatiquement a partir des metadonnees du checkpoint.
 
 ## 12. Loss Et Metriques
 
@@ -747,17 +750,17 @@ Le serveur peut scanner plusieurs dossiers de modeles via `MODEL_DIRS`, utiliser
 
 Les limites importantes sont :
 
-- duree fixe de 4 secondes en inference ;
-- pas encore de fenetrage glissant pour les clips longs ;
-- reconstruction baseline avec phase bruitée ;
-- le masque `sigmoid` ne peut qu'attenuer la magnitude ;
-- l'API actuelle cible surtout les checkpoints U-Net magnitude ;
+- latence CPU : le modele est *compute-bound*, ~0,1x temps reel sur CPU
+  multi-coeurs ; le GPU est recommande pour le debit / temps reel ;
+- en mode `mask` (retrocompat), le masque `sigmoid` ne peut qu'attenuer la
+  magnitude et conserve la phase bruitée — depasse par le mode `complex` ;
 - qualite dependante de la diversite des voix et bruits sources ;
 - dataset synthetique : il faut comparer regulierement avec des captures reelles.
 
-La limite de phase est la plus structurante. En mode `mask`, le modele peut
-nettoyer beaucoup de bruit, mais ne reconstruit pas une phase propre. Le mode
-complexe est une piste pour lever cette contrainte.
+> **Resolu depuis** : la duree d'inference est desormais **quelconque**
+> (fenetrage 4 s + overlap-add 50 %, cf. `src/denoiser.py`), et le mode
+> **`complex` de production reconstruit une phase propre** — la limite de phase
+> du masque magnitude est levee.
 
 ## 19. Commandes De Reference
 
@@ -854,7 +857,10 @@ modele PyTorch isole. Sa force principale est la tracabilite : chaque dataset
 est genere depuis une configuration sauvegardee, chaque sample garde ses
 metadonnees, chaque run conserve sa config et son historique.
 
-La baseline U-Net magnitude est stable, simple a servir et adaptee a une premiere
-version de filtre vocal. Les prochaines ameliorations naturelles sont le
-traitement de clips longs, l'evaluation sur audios reels, et la consolidation du
-mode complexe pour depasser les limites de la phase bruitée.
+Le modele de production est un U-Net **complex spectral mapping** qui reconstruit
+la phase (au-dela du plafond du masque magnitude), sert des sons de **duree
+quelconque** (fenetrage 4 s + overlap-add 50 %) et se distribue comme **paquet
+TorchScript autonome** installable depuis n'importe ou. La baseline magnitude
+reste disponible pour la retrocompatibilite. Les prochaines ameliorations
+naturelles sont l'evaluation sur audios reels et un modele plus leger pour le
+temps reel CPU.

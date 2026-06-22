@@ -162,8 +162,8 @@ Prepared chunks and generated pairs should match the active config. The default 
 format      : WAV
 channels    : mono
 sample rate : 16000 Hz
-duration    : 3.0 seconds
-samples     : 48000
+duration    : 4.0 seconds
+samples     : 64000
 ```
 
 ## Metadata
