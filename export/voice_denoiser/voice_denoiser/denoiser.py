@@ -40,9 +40,11 @@ class VoiceDenoiser:
         dossier du paquet lui-même (les artefacts sont livrés avec le paquet).
     device     : "cuda" / "cpu" / torch.device. Auto si None.
     overlap    : recouvrement entre fenêtres de 4 s (défaut : valeur du metadata).
+    batch_size : nb de fenêtres de 4 s traitées en un seul forward (mémoire
+        bornée : un son long est découpé en paquets de cette taille).
     """
 
-    def __init__(self, bundle_dir=None, device=None, overlap=None):
+    def __init__(self, bundle_dir=None, device=None, overlap=None, batch_size=8):
         bundle = Path(bundle_dir) if bundle_dir is not None else _PKG_DIR
         ts_path = bundle / "model.ts"
         meta_path = bundle / "metadata.json"
@@ -64,9 +66,16 @@ class VoiceDenoiser:
                        else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         # Lecture via buffer : le load C++ de torch ne résout pas les chemins
         # non-ASCII sous Windows ; Python si. Sans effet sur un chemin classique.
-        self.model = torch.jit.load(io.BytesIO(ts_path.read_bytes()),
-                                    map_location=self.device)
-        self.model.eval()
+        loaded = torch.jit.load(io.BytesIO(ts_path.read_bytes()),
+                                map_location=self.device)
+        loaded.eval()
+        # Optimisation inférence (fusion + MKLDNN sur CPU). Le .ts livré reste le
+        # module « pur », portable ; l'optimisation est appliquée ici, sur la
+        # machine cible. Repli silencieux si la version de torch ne la gère pas.
+        try:
+            self.model = torch.jit.optimize_for_inference(loaded)
+        except Exception:
+            self.model = loaded
 
         m = self.meta
         self.sample_rate = int(m["sample_rate"])
@@ -79,6 +88,7 @@ class VoiceDenoiser:
                              else m.get("overlap_default", 0.5))
         if not (0.0 <= self.overlap < 1.0):
             raise ValueError(f"overlap doit être dans [0, 1) — reçu {self.overlap}.")
+        self.batch_size = max(1, int(batch_size))
 
     # ------------------------------------------------------------------ #
     # Forward complex sur UNE fenêtre de `clip_samples` échantillons.
@@ -86,21 +96,31 @@ class VoiceDenoiser:
     # ------------------------------------------------------------------ #
     @torch.no_grad()
     def _denoise_window(self, wav_4s: np.ndarray) -> np.ndarray:
+        """Forward complex sur UNE fenêtre (wrapper batch B=1)."""
+        return self._denoise_windows(wav_4s[None, :])[0]
+
+    @torch.no_grad()
+    def _denoise_windows(self, wav_batch: np.ndarray) -> np.ndarray:
+        """Forward complex vectorisé : `(B, clip_samples)` -> `(B, clip_samples)`.
+
+        STFT/forward/ISTFT portent nativement la dimension batch ; le résultat par
+        fenêtre est identique (à epsilon près) au passage séquentiel.
+        """
         eps = 1e-8
         c = self.c_comp
         wav = torch.from_numpy(
-            np.ascontiguousarray(wav_4s, dtype=np.float32)).unsqueeze(0).to(self.device)
+            np.ascontiguousarray(wav_batch, dtype=np.float32)).to(self.device)  # (B, T)
         win = torch.hann_window(self.win_length, device=self.device, dtype=torch.float32)
 
         ns = torch.stft(wav, n_fft=self.n_fft, hop_length=self.hop_length,
                         win_length=self.win_length, window=win, center=True,
-                        pad_mode="constant", return_complex=True)
+                        pad_mode="constant", return_complex=True)              # (B, F, T)
         n_mag = ns.abs()
         n_scale = (n_mag + eps).pow(c - 1.0)
         model_input = torch.stack([ns.real * n_scale, ns.imag * n_scale], dim=1)
 
         pred_ri = self.model(model_input).float()
-        pred_re, pred_im = pred_ri[:, 0], pred_ri[:, 1]
+        pred_re, pred_im = pred_ri[:, 0], pred_ri[:, 1]                        # (B,F,T)
 
         pred_cmag = torch.sqrt(pred_re ** 2 + pred_im ** 2 + eps)
         up = pred_cmag.pow((1.0 - c) / c)
@@ -108,8 +128,8 @@ class VoiceDenoiser:
 
         pred_wav = torch.istft(pred_spec, n_fft=self.n_fft, hop_length=self.hop_length,
                                win_length=self.win_length, window=win, center=True,
-                               length=self.clip_samples, return_complex=False)
-        return pred_wav.squeeze(0).cpu().numpy()
+                               length=self.clip_samples, return_complex=False)  # (B, T)
+        return pred_wav.cpu().numpy()
 
     # ------------------------------------------------------------------ #
     # API principale : durée quelconque
@@ -153,9 +173,15 @@ class VoiceDenoiser:
         if not starts or starts[-1] != L - clip:
             starts.append(L - clip)
 
-        for s in starts:
-            pred = self._denoise_window(wp[s:s + clip])
-            out[s:s + clip] += pred * synth
+        # Toutes les fenêtres, traitées par paquets de `batch_size` (mémoire bornée).
+        windows = np.stack([wp[s:s + clip] for s in starts])      # (Nw, clip)
+        preds = np.empty((len(starts), clip), dtype=np.float32)
+        for i in range(0, len(starts), self.batch_size):
+            preds[i:i + self.batch_size] = self._denoise_windows(
+                windows[i:i + self.batch_size])
+
+        for k, s in enumerate(starts):
+            out[s:s + clip] += preds[k] * synth
             wsum[s:s + clip] += synth
 
         result = out / np.maximum(wsum, 1e-8)

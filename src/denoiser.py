@@ -87,13 +87,21 @@ class Denoiser:
 
     Paramètres
     ----------
-    ckpt_path : chemin souple vers le checkpoint (cf. ``resolve_ckpt_path``).
-    device    : "cuda" / "cpu" / torch.device. Auto si None.
-    overlap   : recouvrement entre fenêtres de 4 s (0.5 = 50 %, défaut).
+    ckpt_path  : chemin souple vers le checkpoint (cf. ``resolve_ckpt_path``).
+    device     : "cuda" / "cpu" / torch.device. Auto si None.
+    overlap    : recouvrement entre fenêtres de 4 s (0.5 = 50 %, défaut).
+    batch_size : nb de fenêtres de 4 s traitées en un seul forward (mémoire
+                 bornée : un son long est découpé en paquets de cette taille).
+    optimize   : tente ``torch.jit.script`` + ``optimize_for_inference`` au
+                 chargement (fusion + MKLDNN). **Désactivé par défaut** : mesuré
+                 sans gain runtime sur ce modèle (compute-bound, une fenêtre sature
+                 déjà les threads) alors que le scripting coûte au démarrage. Repli
+                 silencieux sur l'eager si le scripting échoue.
     """
 
     def __init__(self, ckpt_path: str | os.PathLike, device=None,
-                 overlap: float = 0.5):
+                 overlap: float = 0.5, batch_size: int = 8,
+                 optimize: bool = False):
         if not (0.0 <= overlap < 1.0):
             raise ValueError(f"overlap doit être dans [0, 1) — reçu {overlap}.")
         self.device = (torch.device(device) if device is not None
@@ -121,11 +129,24 @@ class Denoiser:
         self.info = load_checkpoint(resolved, model, device=self.device)
         model.eval()
 
+        # Optimisation inférence : script + fusion + MKLDNN. Mathématiquement
+        # équivalent (pas de fold conv+GroupNorm, juste layout/fusions sûres) ;
+        # on retombe sur l'eager si le scripting bute sur ce checkpoint.
+        self.optimized = False
+        if optimize:
+            try:
+                scripted = torch.jit.script(model)
+                model = torch.jit.optimize_for_inference(scripted)
+                self.optimized = True
+            except Exception:
+                model.eval()  # repli : eager reste correct
+
         self.model = model
         self.ckpt_path = resolved
         self.base_channels = base_channels
         self.norm_groups = norm_groups
         self.overlap = overlap
+        self.batch_size = max(1, int(batch_size))
         # Métadonnées du contrat d'entrée (utiles pour un packaging futur).
         self.sample_rate = cfg.SAMPLE_RATE
         self.clip_samples = cfg.CLIP_SAMPLES
@@ -161,25 +182,33 @@ class Denoiser:
         return audio.reconstruct(pred_mag, phase, length=cfg.CLIP_SAMPLES)
 
     def _forward_complex(self, noisy_wav: np.ndarray) -> np.ndarray:
-        """Complex spectral mapping : Re/Im power-compressés, phase récupérée.
+        """Complex spectral mapping sur UNE fenêtre (wrapper batch B=1)."""
+        return self._forward_complex_batch(noisy_wav[None, :])[0]
 
-        Reproduit `forward_fn_complex` de `src/train.py` (et `denoise_complex`
-        de `scripts/listen_test.py`) à l'identique.
+    @torch.no_grad()
+    def _forward_complex_batch(self, wav_batch: np.ndarray) -> np.ndarray:
+        """Complex spectral mapping vectorisé sur un batch de fenêtres.
+
+        Entrée `(B, CLIP_SAMPLES)` -> sortie `(B, CLIP_SAMPLES)`. STFT/forward/
+        ISTFT portent nativement la dimension batch : le résultat par fenêtre est
+        identique (à epsilon flottant près) au passage séquentiel. Reproduit
+        `forward_fn_complex` de `src/train.py` à l'identique (`c=CSM_COMPRESS`).
         """
         eps = 1e-8
         c = self.c_comp
-        wav = torch.from_numpy(noisy_wav).float().unsqueeze(0).to(self.device)  # (1, T)
+        wav = torch.from_numpy(
+            np.ascontiguousarray(wav_batch, dtype=np.float32)).to(self.device)  # (B, T)
         win = torch.hann_window(cfg.WIN_LENGTH, device=self.device, dtype=torch.float32)
 
         ns = torch.stft(wav, n_fft=cfg.N_FFT, hop_length=cfg.HOP_LENGTH,
                         win_length=cfg.WIN_LENGTH, window=win, center=True,
-                        pad_mode="constant", return_complex=True)              # (1, F, T)
+                        pad_mode="constant", return_complex=True)              # (B, F, T)
         n_mag = ns.abs()
         n_scale = (n_mag + eps).pow(c - 1.0)
-        model_input = torch.stack([ns.real * n_scale, ns.imag * n_scale], dim=1)  # (1,2,F,T)
+        model_input = torch.stack([ns.real * n_scale, ns.imag * n_scale], dim=1)  # (B,2,F,T)
 
         pred_ri = self.model(model_input).float()
-        pred_re, pred_im = pred_ri[:, 0], pred_ri[:, 1]
+        pred_re, pred_im = pred_ri[:, 0], pred_ri[:, 1]                        # (B,F,T)
 
         pred_cmag = torch.sqrt(pred_re ** 2 + pred_im ** 2 + eps)
         up = pred_cmag.pow((1.0 - c) / c)
@@ -187,8 +216,19 @@ class Denoiser:
 
         pred_wav = torch.istft(pred_spec, n_fft=cfg.N_FFT, hop_length=cfg.HOP_LENGTH,
                                win_length=cfg.WIN_LENGTH, window=win, center=True,
-                               length=cfg.CLIP_SAMPLES, return_complex=False)
-        return pred_wav.squeeze(0).cpu().numpy()
+                               length=cfg.CLIP_SAMPLES, return_complex=False)  # (B, T)
+        return pred_wav.cpu().numpy()
+
+    @torch.no_grad()
+    def _denoise_windows(self, windows: np.ndarray) -> np.ndarray:
+        """Débruite un batch de fenêtres `(B, CLIP_SAMPLES)` -> `(B, CLIP_SAMPLES)`.
+
+        Mode complex : vectorisé en un seul forward. Mode masque (moins critique,
+        STFT librosa par fenêtre) : boucle.
+        """
+        if self.output_mode == "complex":
+            return self._forward_complex_batch(windows)
+        return np.stack([self._forward_mask(w) for w in windows])
 
     # ------------------------------------------------------------------ #
     # API principale : durée quelconque
@@ -242,9 +282,15 @@ class Denoiser:
         if not starts or starts[-1] != L - clip:
             starts.append(L - clip)                               # garantit la couverture de la fin
 
-        for s in starts:
-            pred = self._denoise_window(wp[s:s + clip])           # longueur clip
-            out[s:s + clip] += pred * synth
+        # Toutes les fenêtres, traitées par paquets de `batch_size` (mémoire bornée).
+        windows = np.stack([wp[s:s + clip] for s in starts])      # (Nw, clip)
+        preds = np.empty((len(starts), clip), dtype=np.float32)
+        for i in range(0, len(starts), self.batch_size):
+            preds[i:i + self.batch_size] = self._denoise_windows(
+                windows[i:i + self.batch_size])
+
+        for k, s in enumerate(starts):
+            out[s:s + clip] += preds[k] * synth
             wsum[s:s + clip] += synth
 
         result = out / np.maximum(wsum, 1e-8)

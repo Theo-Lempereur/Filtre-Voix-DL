@@ -136,7 +136,12 @@ Tout est traçable dans `metadata.json` (et `box.meta`) : `run_id`, `epoch`,
 
 - **Mode** : ce paquet ne gère que le **complex spectral mapping** (le modèle de
   prod) ; il refuse un modèle d'un autre mode.
-- **Vitesse** : le découpage en fenêtres de 4 s permet, si besoin un jour, de
-  batcher les fenêtres sur GPU (non fait ici, non prioritaire).
+- **Vitesse** : les fenêtres de 4 s sont traitées **par batch** (`VoiceDenoiser(
+  batch_size=...)`, défaut 8, mémoire bornée) et le module TorchScript est passé
+  dans `optimize_for_inference` au chargement. Le modèle est *compute-bound* : sur
+  un CPU multi-cœurs il tourne déjà à ~0,1× temps réel et le batch n'y change rien
+  (une fenêtre sature déjà les threads) ; **le vrai levier est le GPU** (~150×
+  temps réel). Pour de la latence type temps-réel CPU, il faudrait un modèle plus
+  léger (réentraînement) — hors scope du paquet.
 - **Fidélité** : le forward du paquet est une copie exacte du chemin validé du
   repo (`src/denoiser.py`, mode complex) — sorties identiques à < 1e-4 près.
