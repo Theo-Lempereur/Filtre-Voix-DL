@@ -37,9 +37,9 @@ data/logs/
 cache.tar
 runpodctl.exe
 
-# Artefacts d'export générés (modèle embarqué dans le paquet voice_denoiser)
-export/voice_denoiser/voice_denoiser/model.ts
-export/voice_denoiser/voice_denoiser/metadata.json
+# Artefacts d'export générés (modèle embarqué dans le paquet wallace)
+export/wallace/wallace/model.ts
+export/wallace/wallace/metadata.json
 export/**/build/
 export/**/dist/
 export/**/*.egg-info/

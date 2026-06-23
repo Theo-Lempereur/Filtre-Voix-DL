@@ -1,11 +1,11 @@
-"""`Denoiser` : la « boîte » d'inférence réutilisable du débruiteur de voix.
+"""`Wallace` : la « boîte » d'inférence réutilisable du débruiteur de voix.
 
 Objet unique et autonome qu'on construit avec un checkpoint et à qui on donne une
 forme d'onde (de durée **quelconque**) pour récupérer la forme d'onde débruitée :
 
-    from src.denoiser import Denoiser
+    from src.denoiser import Wallace
 
-    box = Denoiser("checkpoints/rp_csm_final/best_si_sdri.pt")
+    box = Wallace("checkpoints/rp_csm_final/best_si_sdri.pt")
     clean = box.denoise(noisy_wav)            # numpy float32, n'importe quelle durée
     box.denoise_file("in.wav", "out.wav")     # confort fichier -> fichier
     wav_bytes = box.denoise_bytes(raw_bytes)  # pour le service HTTP
@@ -82,7 +82,7 @@ def resolve_ckpt_path(path: str | os.PathLike) -> str:
 # La boîte
 # ---------------------------------------------------------------------------
 
-class Denoiser:
+class Wallace:
     """Débruiteur de voix prêt à l'emploi, durée d'entrée quelconque.
 
     Paramètres

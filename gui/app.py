@@ -35,7 +35,7 @@ BUILD_CACHE_SCRIPT = REPO_ROOT / "scripts" / "build_wav_cache.py"
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Filtre-Voix-DL — Orchestrateur d'entraînements")
+        self.setWindowTitle("Wallace — Orchestrateur d'entraînements")
         self.resize(1500, 900)
 
         self.runner = TrainingRunner(self)

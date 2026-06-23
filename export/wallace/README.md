@@ -1,4 +1,4 @@
-# voice_denoiser — ajouter le débruiteur à un service
+# wallace — ajouter le débruiteur à un service
 
 Boîte **autonome** : le modèle de débruitage de voix empaqueté avec ses outils,
 importable **sans cloner le repo d'entraînement**. Une entrée (audio), une sortie
@@ -9,8 +9,8 @@ importable **sans cloner le repo d'entraînement**. Une entrée (audio), une sor
 ## 1. Contenu du paquet
 
 ```
-voice_denoiser/
-├── __init__.py        # expose VoiceDenoiser
+wallace/
+├── __init__.py        # expose Wallace
 ├── denoiser.py        # la boîte (forward + fenêtrage 4 s + overlap-add 50 %)
 ├── model.ts           # le modèle TorchScript (architecture + poids embarqués)
 └── metadata.json      # contrat d'entrée + provenance (run, epoch, SI-SDRi)
@@ -25,13 +25,13 @@ voice_denoiser/
 cloner le repo, juste une URL :
 
 ```bash
-pip install https://github.com/Theo-Lempereur/Filtre-Voix-DL/releases/download/voice-denoiser-v1.0.0/voice_denoiser-1.0.0-py3-none-any.whl
+pip install https://github.com/Theo-Lempereur/Filtre-Voix-DL/releases/download/wallace-v1.0.0/wallace-1.0.0-py3-none-any.whl
 ```
 
 **Depuis une copie locale du paquet** (si tu as le dossier avec `model.ts` dedans) :
 
 ```bash
-pip install ./voice_denoiser
+pip install ./wallace
 ```
 
 Dans les deux cas, les dépendances (`torch`, `numpy`, `soundfile`, `librosa`) sont
@@ -48,10 +48,10 @@ débruité.
 ## 4. Usage minimal
 
 ```python
-from voice_denoiser import VoiceDenoiser
+from wallace import Wallace
 
-box = VoiceDenoiser()                 # trouve model.ts / metadata.json dans le paquet
-                                      # VoiceDenoiser(device="cuda") pour forcer le GPU
+box = Wallace()                       # trouve model.ts / metadata.json dans le paquet
+                                      # Wallace(device="cuda") pour forcer le GPU
 
 # Fichier -> fichier (n'importe quelle durée)
 box.denoise_file("bruite.wav", "propre.wav")
@@ -72,15 +72,15 @@ Le modèle se charge **une fois** au démarrage, puis chaque requête appelle
 ```python
 # server.py
 from fastapi import FastAPI, UploadFile, Response, HTTPException
-from voice_denoiser import VoiceDenoiser
+from wallace import Wallace
 
 app = FastAPI()
-box: VoiceDenoiser | None = None
+box: Wallace | None = None
 
 @app.on_event("startup")
 def _load():
     global box
-    box = VoiceDenoiser()                      # ou VoiceDenoiser(device="cuda")
+    box = Wallace()                            # ou Wallace(device="cuda")
 
 @app.get("/health")
 def health():
@@ -102,7 +102,7 @@ Lancer : `uvicorn server:app`. Tester : `curl -F file=@bruite.wav http://localho
 > Dans **notre** repo, `serve/server.py` suit déjà ce schéma (chargement au
 > lifespan + `denoise_bytes`). Pour le faire pointer sur le paquet exporté au lieu
 > du chemin repo, il suffit de remplacer `serve.inference.load_model(...)` par
-> `VoiceDenoiser()` et `denoise_bytes(audio_bytes, model, ...)` par
+> `Wallace()` et `denoise_bytes(audio_bytes, model, ...)` par
 > `model.denoise_bytes(audio_bytes)` — les signatures sont volontairement proches.
 
 ## 6. (Ré)générer et publier le modèle
@@ -114,16 +114,16 @@ Depuis le **repo d'entraînement** :
 python scripts/export_model.py --ckpt rp_csm_final
 
 # 2. construire le wheel autonome (modèle embarqué)
-python -m pip wheel --no-deps -w export/voice_denoiser/dist ./export/voice_denoiser
+python -m pip wheel --no-deps -w export/wallace/dist ./export/wallace
 
 # 3. publier en GitHub Release -> installable par URL depuis n'importe où
-gh release create voice-denoiser-v1.0.1 \
-    export/voice_denoiser/dist/voice_denoiser-1.0.1-py3-none-any.whl \
-    --title "voice_denoiser v1.0.1" --notes "nouveau modèle ..."
+gh release create wallace-v1.0.1 \
+    export/wallace/dist/wallace-1.0.1-py3-none-any.whl \
+    --title "wallace v1.0.1" --notes "nouveau modèle ..."
 ```
 
 Bumpe la version dans `pyproject.toml` à chaque nouveau modèle. Pour juste tester
-en local sans release : `pip install ./export/voice_denoiser`.
+en local sans release : `pip install ./export/wallace`.
 
 ## 7. Provenance
 
@@ -136,7 +136,7 @@ Tout est traçable dans `metadata.json` (et `box.meta`) : `run_id`, `epoch`,
 
 - **Mode** : ce paquet ne gère que le **complex spectral mapping** (le modèle de
   prod) ; il refuse un modèle d'un autre mode.
-- **Vitesse** : les fenêtres de 4 s sont traitées **par batch** (`VoiceDenoiser(
+- **Vitesse** : les fenêtres de 4 s sont traitées **par batch** (`Wallace(
   batch_size=...)`, défaut 8, mémoire bornée) et le module TorchScript est passé
   dans `optimize_for_inference` au chargement. Le modèle est *compute-bound* : sur
   un CPU multi-cœurs il tourne déjà à ~0,1× temps réel et le batch n'y change rien

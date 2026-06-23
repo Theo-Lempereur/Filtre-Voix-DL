@@ -1,8 +1,8 @@
-"""Inférence HTTP — fine couche au-dessus de ``src.denoiser.Denoiser``.
+"""Inférence HTTP — fine couche au-dessus de ``src.denoiser.Wallace``.
 
 Ce module conserve l'API publique historique (``load_model`` /
 ``denoise_bytes`` / ``resolve_ckpt_path``) attendue par ``serve/server.py``,
-mais **délègue tout** à la « boîte » unique ``src.denoiser.Denoiser`` :
+mais **délègue tout** à la « boîte » unique ``src.denoiser.Wallace`` :
 
   - chargement du checkpoint avec **détection du mode** (mask ↔ complex) — ce qui
     corrige l'incompatibilité de l'ancienne implémentation avec les modèles
@@ -12,7 +12,7 @@ mais **délègue tout** à la « boîte » unique ``src.denoiser.Denoiser`` :
     l'ancienne version rognait brutalement à 4 s (`fix_length(center)`).
 
 Le « modèle » manipulé par ``server.py`` est désormais une instance de
-``Denoiser`` ; ``server.py`` la traite de façon opaque (la passe à
+``Wallace`` ; ``server.py`` la traite de façon opaque (la passe à
 ``denoise_bytes``, teste seulement ``is None``), donc aucune modification de
 ``server.py`` n'est nécessaire.
 """
@@ -25,15 +25,15 @@ from pathlib import Path
 # lancé (depuis la racine du repo, via systemd avec un autre CWD, etc.).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.denoiser import Denoiser, resolve_ckpt_path  # noqa: E402,F401  (re-export)
+from src.denoiser import Wallace, resolve_ckpt_path  # noqa: E402,F401  (re-export)
 
 
-def load_model(ckpt_path: str, device: str) -> tuple[Denoiser, str, str]:
-    """Charge un checkpoint dans une boîte ``Denoiser``.
+def load_model(ckpt_path: str, device: str) -> tuple[Wallace, str, str]:
+    """Charge un checkpoint dans une boîte ``Wallace``.
 
     Renvoie ``(denoiser, input_repr, resolved_path)`` — signature conservée pour
     ``serve/server.py``. Le premier élément (le « modèle ») est désormais un
-    ``Denoiser`` qui encapsule modèle + pipeline.
+    ``Wallace`` qui encapsule modèle + pipeline.
 
     Raises
     ------
@@ -42,13 +42,13 @@ def load_model(ckpt_path: str, device: str) -> tuple[Denoiser, str, str]:
     RuntimeError
         Si l'architecture du checkpoint ne correspond pas (load_state_dict strict).
     """
-    box = Denoiser(ckpt_path, device=device)
+    box = Wallace(ckpt_path, device=device)
     return box, box.input_repr, box.ckpt_path
 
 
 def denoise_bytes(
     audio_bytes: bytes,
-    model: Denoiser,
+    model: Wallace,
     device: str | None = None,
     input_repr: str | None = None,
 ) -> bytes:
@@ -58,7 +58,7 @@ def denoise_bytes(
     ffmpeg est installé). Renvoie toujours un WAV mono 16 kHz PCM 16 bits, de
     **durée quelconque** (plus de troncature à 4 s).
 
-    ``device`` et ``input_repr`` sont ignorés (portés par le ``Denoiser``) ; ils
+    ``device`` et ``input_repr`` sont ignorés (portés par le ``Wallace``) ; ils
     restent dans la signature pour la compatibilité avec ``serve/server.py``.
 
     Raises

@@ -1,4 +1,4 @@
-# 🎙️ Filtre-Voix-DL
+# 🎙️ Wallace
 
 **Un débruiteur de voix par deep learning — qui s'installe en une ligne, traite un audio de n'importe quelle durée, et restaure la voix au lieu de simplement l'atténuer.**
 
@@ -8,7 +8,7 @@
 ![SI--SDRi](https://img.shields.io/badge/SI--SDRi-~%2B11%20dB-blue)
 ![Installation](https://img.shields.io/badge/pip-depuis%20n'importe%20o%C3%B9-orange)
 
-Filtre-Voix-DL transforme une voix noyée dans le bruit de fond en une voix claire.
+Wallace transforme une voix noyée dans le bruit de fond en une voix claire.
 Au cœur : un **U-Net** entraîné sur spectrogrammes en **complex spectral mapping**,
 qui prédit le spectre complexe propre (partie réelle + imaginaire) pour **récupérer
 la phase** — là où un masque de magnitude classique plafonne, lui va plus loin.
@@ -38,20 +38,20 @@ Le modèle est distribué comme **paquet Python autonome**. Pas besoin de cloner
 dépôt, pas besoin du code d'entraînement : une URL suffit.
 
 ```bash
-pip install https://github.com/Theo-Lempereur/Filtre-Voix-DL/releases/download/voice-denoiser-v1.0.0/voice_denoiser-1.0.0-py3-none-any.whl
+pip install https://github.com/Theo-Lempereur/Filtre-Voix-DL/releases/download/wallace-v1.0.0/wallace-1.0.0-py3-none-any.whl
 ```
 
 ```python
-from voice_denoiser import VoiceDenoiser
+from wallace import Wallace
 
-box = VoiceDenoiser()                            # modèle TorchScript embarqué, prêt à l'emploi
+box = Wallace()                                  # modèle TorchScript embarqué, prêt à l'emploi
 box.denoise_file("bruite.wav", "propre.wav")     # fichier → fichier, n'importe quelle durée
 
 # ... ou en mémoire, pour un service :
 wav_bytes = box.denoise_bytes(open("bruite.wav", "rb").read())   # bytes → bytes (WAV 16 kHz)
 
 # ... ou sur GPU pour le temps réel :
-box = VoiceDenoiser(device="cuda")
+box = Wallace(device="cuda")
 ```
 
 Le paquet ne dépend que de `torch`, `numpy`, `soundfile`, `librosa` — **aucune
@@ -59,7 +59,7 @@ dépendance au code d'entraînement**. Contrat d'entrée : le modèle travaille 
 **mono 16 kHz** ; `denoise(wav, sr=...)` met en mono et rééchantillonne pour vous.
 
 > Détails d'intégration, (ré)génération et publication du paquet :
-> [export/voice_denoiser/README.md](export/voice_denoiser/README.md).
+> [export/wallace/README.md](export/wallace/README.md).
 
 ---
 
@@ -148,9 +148,9 @@ Pour les gros runs sur GPU loué, voir [RUNPOD.md](RUNPOD.md).
 python scripts/export_model.py --ckpt mon_run       # → model.ts + metadata.json
 ```
 
-Génère le paquet `voice_denoiser` autonome (TorchScript + métadonnées). Procédure
+Génère le paquet `wallace` autonome (TorchScript + métadonnées). Procédure
 complète (build du wheel, publication en GitHub Release) :
-[export/voice_denoiser/README.md](export/voice_denoiser/README.md).
+[export/wallace/README.md](export/wallace/README.md).
 
 ---
 
@@ -188,11 +188,11 @@ configs/dataset_config.yaml  Configuration dataset active
 scripts/
 ├── run_full_pipeline.py     Pipeline dataset (GUI + CLI)
 ├── train_local.py           Entraînement local (lock partagé, reprise)
-├── export_model.py          Génère le paquet voice_denoiser depuis un checkpoint
+├── export_model.py          Génère le paquet wallace depuis un checkpoint
 ├── denoise_file.py          Débruite un fichier en CLI
 └── listen_test.py           Génère noisy/pred/clean pour l'écoute + SI-SDR
 serve/                       API d'inférence FastAPI + guide d'intégration
-export/voice_denoiser/       Paquet autonome téléchargeable (TorchScript)
+export/wallace/       Paquet autonome téléchargeable (TorchScript)
 gui/                         Interfaces de configuration et d'entraînement
 MEMOIRE_TECHNIQUE.md         Documentation technique détaillée
 SETUP.md                     Guide d'installation et workflow d'équipe
@@ -216,7 +216,7 @@ SETUP.md                     Guide d'installation et workflow d'équipe
 | Document | Pour qui / quoi |
 |---|---|
 | [README.md](README.md) | Vue d'ensemble (ce fichier) |
-| [export/voice_denoiser/README.md](export/voice_denoiser/README.md) | **Utiliser le paquet** dans un service |
+| [export/wallace/README.md](export/wallace/README.md) | **Utiliser le paquet** dans un service |
 | [serve/INTEGRATION.md](serve/INTEGRATION.md) | **Intégrer l'API** à un site web |
 | [data/README.md](data/README.md) | Pipeline de génération du dataset |
 | [SETUP.md](SETUP.md) | Installation & workflow de développement |

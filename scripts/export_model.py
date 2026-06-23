@@ -1,9 +1,9 @@
-"""Exporte un checkpoint **complex** vers le paquet autonome ``voice_denoiser``.
+"""Exporte un checkpoint **complex** vers le paquet autonome ``wallace``.
 
 Sérialise le U-Net en **TorchScript** (architecture + poids embarqués → le service
 consommateur n'a plus besoin de `src/model.py`) et écrit les métadonnées (contrat
 d'entrée + provenance). Les deux artefacts atterrissent dans le dossier du paquet
-``export/voice_denoiser/voice_denoiser/`` pour être embarqués au ``pip install``.
+``export/wallace/wallace/`` pour être embarqués au ``pip install``.
 
 Usage :
     python scripts/export_model.py --ckpt rp_csm_final
@@ -26,10 +26,10 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src import config as cfg
-from src.denoiser import Denoiser
+from src.denoiser import Wallace
 
 _DEFAULT_OUT = (Path(__file__).resolve().parents[1]
-                / "export" / "voice_denoiser" / "voice_denoiser")
+                / "export" / "wallace" / "wallace")
 
 
 def _resolve_ckpt_arg(ckpt: str) -> str:
@@ -39,7 +39,7 @@ def _resolve_ckpt_arg(ckpt: str) -> str:
     candidate = Path(cfg.CHECKPOINTS) / ckpt
     if candidate.exists():
         return str(candidate)
-    return ckpt  # laisse Denoiser tenter sa résolution / lever une erreur claire
+    return ckpt  # laisse Wallace tenter sa résolution / lever une erreur claire
 
 
 def main() -> int:
@@ -54,11 +54,11 @@ def main() -> int:
     ap.add_argument("--ckpt", required=True,
                     help="Fichier .pt, dossier de run, ou nom de run (sous CHECKPOINTS).")
     ap.add_argument("--out", default=str(_DEFAULT_OUT),
-                    help="Dossier de sortie (défaut : le paquet voice_denoiser).")
+                    help="Dossier de sortie (défaut : le paquet wallace).")
     args = ap.parse_args()
 
     ckpt = _resolve_ckpt_arg(args.ckpt)
-    box = Denoiser(ckpt, device="cpu")          # charge + valide le modèle
+    box = Wallace(ckpt, device="cpu")          # charge + valide le modèle
     if box.output_mode != "complex":
         print(f"[export] ERREUR : output_mode={box.output_mode!r} — "
               f"l'export ne gère que le mode 'complex'.", file=sys.stderr)
@@ -79,7 +79,7 @@ def main() -> int:
     # 2) Métadonnées : contrat d'entrée + provenance.
     info = box.info
     meta = {
-        "name": "voice_denoiser",
+        "name": "wallace",
         "run_id": info.get("run_id") or Path(box.ckpt_path).parent.name,
         "epoch": info.get("epoch"),
         "val_si_sdri": info.get("best_val_si_sdri"),
@@ -106,7 +106,7 @@ def main() -> int:
     print(f"[export] run={meta['run_id']} epoch={meta['epoch']} "
           f"si_sdri={meta['val_si_sdri']:.3f} base_channels={meta['base_channels']}")
     print(f"[export] Paquet prêt. Installe-le dans un service :")
-    print(f"           pip install ./export/voice_denoiser")
+    print(f"           pip install ./export/wallace")
     return 0
 
 

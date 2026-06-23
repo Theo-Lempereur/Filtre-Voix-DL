@@ -158,7 +158,7 @@ import { useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
-export function Denoiser() {
+export function Wallace() {
   const [busy, setBusy] = useState(false);
   const [resultUrl, setResultUrl] = useState(null);
   const [error, setError] = useState(null);
@@ -295,5 +295,5 @@ sudo systemctl status filtre-voix-api
 - **MP3 / OGG en entrée** nécessitent **ffmpeg** installé sur le serveur (`apt install ffmpeg`). WAV et FLAC fonctionnent sans.
 - **Un seul worker** : les requêtes sont traitées séquentiellement. Suffisant pour un usage modéré ; pour de la charge, voir mise à l'échelle (plusieurs workers CPU ou file d'attente).
 - **Compatibilité modèle** : `CKPT_PATH` doit pointer vers un checkpoint entraîné avec le `model.py` actuel (architecture `GroupNorm`, mode `mask` ou `complex`). Le serveur détecte le mode automatiquement.
-- **Alternative sans le repo** : pour intégrer le modèle ailleurs sans cloner ce dépôt, utiliser le paquet autonome `voice_denoiser` (voir [../export/voice_denoiser/README.md](../export/voice_denoiser/README.md)).
+- **Alternative sans le repo** : pour intégrer le modèle ailleurs sans cloner ce dépôt, utiliser le paquet autonome `wallace` (voir [../export/wallace/README.md](../export/wallace/README.md)).
 ```

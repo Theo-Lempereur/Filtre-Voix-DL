@@ -22,7 +22,7 @@ import soundfile as sf
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src import audio, config as cfg
-from src.denoiser import Denoiser
+from src.denoiser import Wallace
 
 
 def parse_args() -> argparse.Namespace:
@@ -162,7 +162,7 @@ def main() -> int:
 
     # La boîte gère le chargement (détection mask/complex), le contrat d'entrée
     # et le forward. Sur un clip de 4 s, `denoise` = une fenêtre (non-régression).
-    denoiser = Denoiser(ckpt_path, device=args.device)
+    denoiser = Wallace(ckpt_path, device=args.device)
     info = denoiser.info
     mode_str = denoiser.output_mode + (
         f" (c={denoiser.c_comp})" if denoiser.output_mode == "complex" else "")

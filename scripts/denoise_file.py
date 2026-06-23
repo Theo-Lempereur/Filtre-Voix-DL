@@ -1,6 +1,6 @@
 """Débruite un fichier audio de durée **quelconque** (> 4 s géré).
 
-S'appuie sur la boîte ``src.denoiser.Denoiser`` : chargement automatique du mode
+S'appuie sur la boîte ``src.denoiser.Wallace`` : chargement automatique du mode
 (mask / complex) depuis le checkpoint, contrat d'entrée mono 16 kHz, et
 fenêtrage 4 s + overlap-add 50 % pour les sons longs.
 
@@ -23,7 +23,7 @@ import soundfile as sf
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src import audio, config as cfg
-from src.denoiser import Denoiser
+from src.denoiser import Wallace
 
 
 def _resolve_ckpt_arg(ckpt: str) -> str:
@@ -34,7 +34,7 @@ def _resolve_ckpt_arg(ckpt: str) -> str:
     candidate = Path(cfg.CHECKPOINTS) / ckpt
     if candidate.exists():
         return str(candidate)
-    # Laisse Denoiser tenter sa propre résolution (ex: nom sans extension) et
+    # Laisse Wallace tenter sa propre résolution (ex: nom sans extension) et
     # lever une erreur claire si vraiment introuvable.
     return ckpt
 
@@ -62,7 +62,7 @@ def main() -> int:
     args = parse_args()
     ckpt = _resolve_ckpt_arg(args.ckpt)
 
-    box = Denoiser(ckpt, device=args.device, overlap=args.overlap)
+    box = Wallace(ckpt, device=args.device, overlap=args.overlap)
     info = box.info
     mode_str = box.output_mode + (
         f" (c={box.c_comp})" if box.output_mode == "complex" else "")

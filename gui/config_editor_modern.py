@@ -201,7 +201,7 @@ class ModernConfigEditor:
 
         self.config_path = config_path
         self.app = ctk.CTk()
-        self.app.title("Filtre-Voix-DL - Dataset Studio")
+        self.app.title("Wallace - Dataset Studio")
         self.app.geometry("1180x780")
         self.app.minsize(1020, 680)
         self.app.configure(fg_color=APP_BG)

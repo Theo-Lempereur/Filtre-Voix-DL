@@ -1,13 +1,13 @@
-"""VoiceDenoiser — débruiteur de voix **autonome** (paquet ``voice_denoiser``).
+"""Wallace — débruiteur de voix **autonome** (paquet ``wallace``).
 
 Boîte importable **sans le repo d'entraînement** : charge un modèle TorchScript
 (``model.ts`` — architecture + poids embarqués) et ses métadonnées
 (``metadata.json``), puis débruite un audio de **durée quelconque** (fenêtrage
 4 s + overlap-add 50 %).
 
-    from voice_denoiser import VoiceDenoiser
+    from wallace import Wallace
 
-    box = VoiceDenoiser()                      # artefacts trouvés dans le paquet
+    box = Wallace()                            # artefacts trouvés dans le paquet
     clean = box.denoise(noisy_wav, sr=16000)   # numpy float32 -> numpy float32
     box.denoise_file("in.wav", "out.wav")      # fichier -> fichier
     wav_bytes = box.denoise_bytes(raw_bytes)   # bytes -> bytes (WAV 16 kHz)
@@ -31,7 +31,7 @@ import torch
 _PKG_DIR = Path(__file__).resolve().parent
 
 
-class VoiceDenoiser:
+class Wallace:
     """Débruiteur prêt à l'emploi, durée d'entrée quelconque (mode complex).
 
     Paramètres
@@ -58,7 +58,7 @@ class VoiceDenoiser:
             self.meta = json.load(f)
         if self.meta.get("output_mode") != "complex":
             raise ValueError(
-                "voice_denoiser ne supporte que output_mode='complex' "
+                "wallace ne supporte que output_mode='complex' "
                 f"(metadata: {self.meta.get('output_mode')!r})."
             )
 

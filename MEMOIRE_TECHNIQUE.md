@@ -1,6 +1,6 @@
-# Mémoire technique — Filtre-Voix-DL
+# Mémoire technique — Wallace
 
-**Filtre-Voix-DL transforme une voix noyée dans le bruit de fond en une voix
+**Wallace transforme une voix noyée dans le bruit de fond en une voix
 claire et naturelle.** Là où les réducteurs de bruit classiques se contentent
 d'« atténuer » le bruit — au prix d'une voix métallique et étouffée —, notre
 système a appris à **reconstruire** la voix propre. Le gain est mesuré, pas
@@ -23,7 +23,7 @@ réutilisable du projet.
 
 ## 1. Vision Generale
 
-Filtre-Voix-DL est un système de **restauration** de voix, pas un simple filtre
+Wallace est un système de **restauration** de voix, pas un simple filtre
 soustractif. Le problème est formulé de façon supervisée : pour chaque exemple,
 le modèle reçoit une voix bruitée et apprend à **reconstruire** la voix propre
 correspondante. C'est ce qui fait la différence à l'écoute — on récupère une voix
@@ -530,7 +530,7 @@ Puis le signal est decompresse avant l'ISTFT. En apprenant la phase, ce mode
 **depasse le plafond du masque de magnitude** (qui ne peut qu'attenuer en
 conservant la phase bruitee). Tout le chemin d'inference le gere de bout en
 bout : `src/denoiser.py` (boite reutilisable), l'API `serve/`, et le paquet
-autonome `voice_denoiser` (TorchScript) detectent et appliquent ce mode
+autonome `wallace` (TorchScript) detectent et appliquent ce mode
 automatiquement a partir des metadonnees du checkpoint.
 
 ## 12. Loss Et Metriques
@@ -735,7 +735,7 @@ d'augmentation, compression, codec et parametres techniques.
 
 Toute l'inférence est centralisée dans une **boîte unique réutilisable**,
 `src/denoiser.py` (`Denoiser`). `serve/inference.py` et `serve/server.py` ne font
-que l'exposer en HTTP ; le paquet autonome `voice_denoiser` en embarque une copie
+que l'exposer en HTTP ; le paquet autonome `wallace` en embarque une copie
 TorchScript. Cette source unique garantit que le fichier en CLI, l'API et le
 paquet produisent exactement le même résultat.
 
@@ -888,7 +888,7 @@ serve/
 
 ## 21. Conclusion
 
-Filtre-Voix-DL n'est pas une simple démo de laboratoire : c'est un **produit
+Wallace n'est pas une simple démo de laboratoire : c'est un **produit
 livrable** — installable en une ligne, servi par une API clé en main, capable de
 traiter un audio de **n'importe quelle durée** et qui **restaure** la voix au
 lieu de seulement la débruiter (~+11 dB de SI-SDRi mesurés).
