@@ -1,19 +1,43 @@
-# Memoire technique - Filtre-Voix-DL
+# Mémoire technique — Filtre-Voix-DL
 
-Ce document decrit le fonctionnement technique du projet Filtre-Voix-DL : le
-modele, les donnees, la generation du dataset, l'utilisation de Google Drive,
-l'entrainement, l'inference et les limites actuelles.
+**Filtre-Voix-DL transforme une voix noyée dans le bruit de fond en une voix
+claire et naturelle.** Là où les réducteurs de bruit classiques se contentent
+d'« atténuer » le bruit — au prix d'une voix métallique et étouffée —, notre
+système a appris à **reconstruire** la voix propre. Le gain est mesuré, pas
+ressenti : **~+11 dB de SI-SDRi**, l'étalon objectif du domaine.
+
+Le produit s'installe **en une ligne**, traite un audio de **n'importe quelle
+durée** (de la seconde à l'heure, sans découpage manuel) et tourne **~150× plus
+vite que le temps réel sur GPU**. Il se livre comme un paquet autonome et une API
+prête à brancher sur un site ou une application.
+
+Ce document décrit le fonctionnement technique sous-jacent : le modèle, les
+données, la génération du dataset, l'entraînement, l'inférence et les limites
+actuelles. Il s'adresse aussi bien au lecteur qui veut comprendre la valeur du
+produit qu'à l'expert qui veut en vérifier les fondations.
 
 Il se base sur le code Python, les configurations YAML et les documents Markdown
-du depot. Les notebooks et fichiers d'infrastructure type RunPod ou shell ne
+du dépôt. Les notebooks et fichiers d'infrastructure type RunPod ou shell ne
 sont pas pris comme source principale ici, afin de documenter le fonctionnement
-reutilisable du projet.
+réutilisable du projet.
 
 ## 1. Vision Generale
 
-Filtre-Voix-DL est un systeme de reduction de bruit pour la voix. Le probleme
-est formule de facon supervisee : pour chaque exemple, le modele recoit une voix
-bruitée et apprend a reconstruire la voix propre correspondante.
+Filtre-Voix-DL est un système de **restauration** de voix, pas un simple filtre
+soustractif. Le problème est formulé de façon supervisée : pour chaque exemple,
+le modèle reçoit une voix bruitée et apprend à **reconstruire** la voix propre
+correspondante. C'est ce qui fait la différence à l'écoute — on récupère une voix
+naturelle plutôt qu'une voix « passée à l'aspirateur ».
+
+Trois choix structurants donnent au produit son avantage :
+
+- **Restauration plutôt qu'atténuation** : le modèle de production reconstruit
+  jusqu'à la phase du signal, là où un masque de bruit classique plafonne (cf.
+  §11).
+- **Durée libre** : tout son, de la seconde à l'heure, est traité sans découpage
+  manuel ni couture audible (cf. §17).
+- **Chaîne maîtrisée de bout en bout** : on fabrique nos propres données, on
+  entraîne, on évalue et on livre — aucune boîte noire achetée ailleurs.
 
 La chaine complete est la suivante :
 
@@ -703,23 +727,35 @@ d'augmentation, compression, codec et parametres techniques.
 
 ## 17. Inference Locale Et API
 
-L'inference est dans `serve/inference.py` et `serve/server.py`.
+> **Durée d'entrée : quelconque.** Contrairement à une idée répandue, le système
+> ne se limite **pas** à 4 secondes. La fenêtre de 4 s est la taille interne de
+> traitement du réseau ; un son plus long est automatiquement découpé en fenêtres
+> de 4 s puis **recombiné par overlap-add pondéré (50 %)**, avec des coutures
+> inaudibles. De la seconde à l'heure, l'audio passe d'un bout à l'autre.
 
-Pipeline :
+Toute l'inférence est centralisée dans une **boîte unique réutilisable**,
+`src/denoiser.py` (`Denoiser`). `serve/inference.py` et `serve/server.py` ne font
+que l'exposer en HTTP ; le paquet autonome `voice_denoiser` en embarque une copie
+TorchScript. Cette source unique garantit que le fichier en CLI, l'API et le
+paquet produisent exactement le même résultat.
+
+Pipeline réel (`Denoiser.denoise` / `denoise_bytes`) :
 
 ```txt
 bytes audio
 -> decode librosa
--> mono 16 kHz
--> crop/pad centre a 4 s
--> STFT
--> magnitude + phase
--> log1p(magnitude)
--> U-Net
--> magnitude predite
--> reconstruction avec phase noisy
+-> mono 16 kHz (contrat d'entree : resample auto si besoin)
+-> si <= 4 s : une fenetre ; si > 4 s : fenetrage 4 s + overlap-add 50 %
+-> par fenetre : STFT complexe -> compression -> U-Net (mode complex) -> ISTFT
+   (la phase est RECONSTRUITE, pas reutilisee depuis le signal bruite)
+-> recombinaison overlap-add (Hann) -> forme d'onde de duree quelconque
 -> WAV PCM16 en memoire
 ```
+
+> Note de rétrocompatibilité : sur un ancien checkpoint en mode `mask`, la même
+> boîte applique la recette historique (`sigmoid × magnitude`, phase bruitée
+> conservée), toujours en durée quelconque. Le **mode de production est
+> `complex`** (§11), qui reconstruit la phase.
 
 L'API FastAPI expose :
 
@@ -852,10 +888,16 @@ serve/
 
 ## 21. Conclusion
 
-Filtre-Voix-DL est construit comme une chaine complete, pas seulement comme un
-modele PyTorch isole. Sa force principale est la tracabilite : chaque dataset
-est genere depuis une configuration sauvegardee, chaque sample garde ses
-metadonnees, chaque run conserve sa config et son historique.
+Filtre-Voix-DL n'est pas une simple démo de laboratoire : c'est un **produit
+livrable** — installable en une ligne, servi par une API clé en main, capable de
+traiter un audio de **n'importe quelle durée** et qui **restaure** la voix au
+lieu de seulement la débruiter (~+11 dB de SI-SDRi mesurés).
+
+Il est construit comme une chaîne complète, pas seulement comme un modèle PyTorch
+isolé. Sa force d'ingénierie est la **traçabilité** : chaque dataset est généré
+depuis une configuration sauvegardée, chaque sample garde ses métadonnées, chaque
+run conserve sa config et son historique — gage de qualité et de reproductibilité
+pour qui veut auditer ou faire évoluer le système.
 
 Le modele de production est un U-Net **complex spectral mapping** qui reconstruit
 la phase (au-dela du plafond du masque magnitude), sert des sons de **duree
